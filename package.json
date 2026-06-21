@@ -1,0 +1,12 @@
+{
+  "name": "atom-collision-simulator",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "npm run build && python3 -m http.server 4173 -d dist",
+    "build": "tsc && cp index.html dist/index.html && cp src/style.css dist/style.css"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}
