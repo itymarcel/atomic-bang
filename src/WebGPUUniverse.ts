@@ -139,7 +139,7 @@ export class WebGPUUniverse {
       } else if (this.phase === "running") {
         this.physicsAccumulator += scaledDt;
         const step = 1 / 60;
-        while (this.physicsAccumulator >= step && steps < 4) {
+        while (this.physicsAccumulator >= step && steps < 6) {
           this.age += step;
           this.physicsAccumulator -= step;
           steps++;
@@ -249,7 +249,7 @@ export class WebGPUUniverse {
     pass.setPipeline(this.clearPipeline); pass.setBindGroup(0, this.clearGroup); pass.dispatchWorkgroups(gridGroups);
     pass.setPipeline(this.depositPipeline); pass.setBindGroup(0, this.depositGroup); pass.dispatchWorkgroups(particleGroups);
     pass.setPipeline(this.jacobiPipeline);
-    for (let iteration = 0; iteration < 12; iteration++) {
+    for (let iteration = 0; iteration < 20; iteration++) {
       pass.setBindGroup(0, iteration % 2 === 0 ? this.jacobiAB : this.jacobiBA);
       pass.dispatchWorkgroups(gridGroups);
     }
@@ -318,15 +318,15 @@ export class WebGPUUniverse {
     view.setUint32(4, this.phase === "running" ? 2 : this.phase === "approach" ? 1 : 0, true);
     view.setUint32(8, WebGPUUniverse.GRID_SIDE, true);
     view.setFloat32(16, dt, true); view.setFloat32(20, this.age, true);
-    const rampT = Math.min(1, this.age / 4), ramp = .04 + .96 * rampT * rampT * (3 - 2 * rampT);
+    const rampT = Math.min(1, this.age / 3), ramp = .06 + .94 * rampT * rampT * rampT * (rampT * (6 * rampT - 15) + 10);
     view.setFloat32(24, this.config.gravity * this.config.gravity * .0022 * 4500 / Math.max(1, this.count) * ramp, true);
     view.setFloat32(28, this.config.impactSpeed, true);
     view.setFloat32(32, this.config.randomness / 100, true);
     view.setFloat32(36, this.config.lifetime, true);
     view.setFloat32(40, this.config.sizeVariation / 100, true);
-    // Keep the mesh tight around the young universe. A 96-unit initial domain
-    // put every particle into the same few atomic cells and serialized deposit.
-    view.setFloat32(44, Math.max(8, 8 + this.age * 92), true);
+    // Domain tracks fastest particles (1.12× impactSpeed) so the mesh stays
+    // tight without letting edge particles escape periodic boundaries.
+    view.setFloat32(44, Math.max(8, 8 + this.age * this.config.impactSpeed * 1.12), true);
     view.setFloat32(48, this.canvas.width, true); view.setFloat32(52, this.canvas.height, true);
     view.setFloat32(56, this.camera.zoom, true); view.setFloat32(60, this.camera.yaw, true);
     view.setFloat32(64, this.camera.pitch, true);

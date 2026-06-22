@@ -259,6 +259,7 @@ struct VertexOutput {
   @location(0) uv: vec2f,
   @location(1) color: vec4f,
   @location(2) aura: f32,
+  @location(3) focused: f32,
 }
 
 fn rotate(point: vec3f) -> vec3f {
@@ -280,14 +281,39 @@ fn particleVertex(@builtin(vertex_index) vertexId: u32, @builtin(instance_index)
   let perspective = focal / max(20.0, focal + view.z * params.zoom) * params.zoom;
   let center = params.viewport * 0.5 + params.pan + view.xy * perspective;
   let aura = select(0.0, 1.0, particle.position.w > 3.0);
-  let pixelRadius = max(0.65, particle.position.w * perspective) * select(1.0, 3.5, aura > 0.5);
+  let isFocused = params.focusId < params.count && instanceId == params.focusId;
+  let baseRadius = max(0.65, particle.position.w * perspective) * select(1.0, 3.5, aura > 0.5);
+  let pixelRadius = select(baseRadius, max(baseRadius, 20.0), isFocused);
   let screen = center + corners[vertexId] * pixelRadius;
   var output: VertexOutput;
   output.position = vec4f(screen.x / params.viewport.x * 2.0 - 1.0, 1.0 - screen.y / params.viewport.y * 2.0, 0.0, 1.0);
   output.uv = corners[vertexId];
-  let hue = f32(instanceId % 4u);
-  output.color = select(vec4f(1.0, .45, .2, .68), vec4f(.55, .72, 1.0, .62), params.age > 5.0 && hue < 1.0);
+
+  // Four color families cycling by instance ID; velocity drives dim→bright
+  // within each family. Additive blending creates purple/cyan/white at overlaps.
+  let speed = length(particle.velocity.xyz);
+  let t = clamp(speed / max(1.0, params.explosion * 0.4), 0.0, 1.0);
+  let isGas = accelerations[instanceId].w < 0.0;
+  let family = instanceId % 4u;
+  var rgb: vec3f;
+  if (family == 0u) {
+    rgb = mix(vec3f(1.0, 0.30, 0.10), vec3f(1.0, 0.80, 0.40), t);   // orange → gold
+  } else if (family == 1u) {
+    rgb = mix(vec3f(0.40, 0.20, 0.90), vec3f(0.60, 0.86, 1.0), t);  // violet → blue-white
+  } else if (family == 2u) {
+    rgb = mix(vec3f(0.10, 0.58, 0.44), vec3f(0.65, 1.0, 0.84), t);  // teal → mint-white
+  } else {
+    rgb = mix(vec3f(1.0, 0.78, 0.20), vec3f(1.0, 0.96, 0.82), t);   // gold → warm white
+  }
+  // Gas particles lean visibly green
+  rgb = select(rgb, mix(rgb, vec3f(0.18, 1.0, 0.52), 0.38), isGas);
+  // Hot young universe: brief orange wash that fades out by age 5s
+  let earlyHeat = max(0.0, 1.0 - params.age / 5.0);
+  rgb = mix(rgb, mix(rgb, vec3f(1.0, 0.52, 0.18), 0.55), earlyHeat * earlyHeat);
+  output.color = vec4f(rgb, 0.68);
+
   output.aura = aura;
+  output.focused = select(0.0, 1.0, isFocused);
   if (abs(accelerations[instanceId].w) <= 0.0) { output.position = vec4f(2.0, 2.0, 0.0, 1.0); }
   return output;
 }
@@ -299,7 +325,14 @@ fn particleFragment(input: VertexOutput) -> @location(0) vec4f {
   let core = 1.0 - smoothstep(0.0, 1.0, radius);
   let alpha = select(smoothstep(1.0, 0.15, radius) * input.color.a, pow(core, 1.7) * .72, input.aura > .5);
   let auraColor = mix(vec3f(1.0, .38, .12), vec3f(1.0, .96, .72), pow(core, 2.0));
-  return vec4f(select(input.color.rgb, auraColor, input.aura > .5), alpha);
+  var finalColor = select(input.color.rgb, auraColor, input.aura > .5);
+  var finalAlpha = alpha;
+  if (input.focused > 0.5) {
+    let ring = smoothstep(0.1, 0.0, abs(radius - 0.78));
+    finalColor = mix(finalColor, vec3f(1.0, 1.0, 1.0), ring * 0.9);
+    finalAlpha = max(finalAlpha, ring * 0.75);
+  }
+  return vec4f(finalColor, finalAlpha);
 }
 
 @vertex
