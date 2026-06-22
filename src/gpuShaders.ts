@@ -19,7 +19,7 @@ struct Params {
   approach: f32,
   pan: vec2f,
   focusId: u32,
-  _pad1: u32,
+  spin: f32,
   _pad2: vec2f,
 }
 
@@ -58,9 +58,11 @@ fn initialize(@builtin(global_invocation_id) gid: vec3u) {
   let spinAxis = normalize(vec3f(0.31, 0.19, 0.931));
   let tangentRaw = cross(spinAxis, direction);
   let tangent = tangentRaw / max(length(tangentRaw), 0.001);
-  let spin = params.explosion * (0.07 + 0.11 * pow(radialDistribution, 0.45));
+  // Core particles get a 2× tangential boost so they orbit instead of radially collapsing.
+  let coreSpinFactor = select(1.0, 2.0, core);
+  let spinSpeed = params.explosion * params.spin * (0.14 + 0.22 * pow(radialDistribution, 0.45)) * coreSpinFactor;
   let noise = vec3f(random(i * 37u + 11u), random(i * 41u + 13u), random(i * 43u + 17u)) * 2.0 - 1.0;
-  let velocity = direction * params.explosion * expansionMultiplier + tangent * spin + noise * params.explosion * params.entropy * 0.012;
+  let velocity = direction * params.explosion * expansionMultiplier + tangent * spinSpeed + noise * params.explosion * params.entropy * 0.012;
 
   let spectrum = params.spectrum;
   let sizeRoll = random(i * 47u + 19u);
@@ -96,7 +98,7 @@ struct Params {
   entropy: f32, lifetime: f32, spectrum: f32, domain: f32,
   viewport: vec2f, zoom: f32, yaw: f32,
   pitch: f32, approach: f32, pan: vec2f,
-  focusId: u32, _pad1: u32, _pad2: vec2f,
+  focusId: u32, spin: f32, _pad2: vec2f,
 }
 struct Particle { position: vec4f, velocity: vec4f }
 @group(0) @binding(0) var<uniform> params: Params;
@@ -141,7 +143,7 @@ struct Params {
   entropy: f32, lifetime: f32, spectrum: f32, domain: f32,
   viewport: vec2f, zoom: f32, yaw: f32,
   pitch: f32, approach: f32, pan: vec2f,
-  focusId: u32, _pad1: u32, _pad2: vec2f,
+  focusId: u32, spin: f32, _pad2: vec2f,
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> mass: array<atomic<u32>>;
@@ -184,7 +186,7 @@ struct Params {
   entropy: f32, lifetime: f32, spectrum: f32, domain: f32,
   viewport: vec2f, zoom: f32, yaw: f32,
   pitch: f32, approach: f32, pan: vec2f,
-  focusId: u32, _pad1: u32, _pad2: vec2f,
+  focusId: u32, spin: f32, _pad2: vec2f,
 }
 struct Particle { position: vec4f, velocity: vec4f }
 @group(0) @binding(0) var<uniform> params: Params;
@@ -247,7 +249,7 @@ struct Params {
   entropy: f32, lifetime: f32, spectrum: f32, domain: f32,
   viewport: vec2f, zoom: f32, yaw: f32,
   pitch: f32, approach: f32, pan: vec2f,
-  focusId: u32, _pad1: u32, _pad2: vec2f,
+  focusId: u32, spin: f32, _pad2: vec2f,
 }
 struct Particle { position: vec4f, velocity: vec4f }
 @group(0) @binding(0) var<uniform> params: Params;
@@ -310,7 +312,9 @@ fn particleVertex(@builtin(vertex_index) vertexId: u32, @builtin(instance_index)
   // Hot young universe: brief orange wash that fades out by age 5s
   let earlyHeat = max(0.0, 1.0 - params.age / 5.0);
   rgb = mix(rgb, mix(rgb, vec3f(1.0, 0.52, 0.18), 0.55), earlyHeat * earlyHeat);
-  output.color = vec4f(rgb, 0.68);
+  // Fade in over first 1.5 sim-seconds so particles don't snap into view
+  let fadeIn = smoothstep(0.0, 1.5, params.age);
+  output.color = vec4f(rgb, 0.68 * fadeIn);
 
   output.aura = aura;
   output.focused = select(0.0, 1.0, isFocused);
@@ -364,7 +368,7 @@ struct Params {
   entropy: f32, lifetime: f32, spectrum: f32, domain: f32,
   viewport: vec2f, zoom: f32, yaw: f32,
   pitch: f32, approach: f32, pan: vec2f,
-  focusId: u32, _pad1: u32, _pad2: vec2f,
+  focusId: u32, spin: f32, _pad2: vec2f,
 }
 struct Particle { position: vec4f, velocity: vec4f }
 struct Pick { point: vec2f, radius: f32, _pad: f32 }

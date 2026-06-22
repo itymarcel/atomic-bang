@@ -333,6 +333,7 @@ export class WebGPUUniverse {
     view.setFloat32(68, Math.min(1, this.approachTime / 1.45), true);
     view.setFloat32(72, this.camera.panX, true); view.setFloat32(76, this.camera.panY, true);
     view.setUint32(80, this.focusId, true);
+    view.setFloat32(84, this.config.angularMomentum / 100, true);
     this.device.queue.writeBuffer(this.paramsBuffer, 0, buffer);
   }
 }

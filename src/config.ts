@@ -5,6 +5,7 @@ export interface SimulationConfig {
   sizeVariation: number;
   lifetime: number;
   randomness: number;
+  angularMomentum: number;
   timeScale: number;
 }
 
@@ -15,6 +16,7 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   sizeVariation: 120,
   lifetime: 180,
   randomness: 64,
+  angularMomentum: 50,
   timeScale: 1,
 };
 
@@ -34,5 +36,6 @@ export const CONTROL_DEFINITIONS: ControlDefinition[] = [
   { key: "sizeVariation", label: "Luminosity spectrum", min: 0, max: 200, step: 2, format: v => `${v}%` },
   { key: "lifetime", label: "Mean lifetime", min: 10, max: 600, step: 10, format: v => `${v}s` },
   { key: "randomness", label: "Entropy", min: 0, max: 100, step: 1, format: v => `${v}%` },
+  { key: "angularMomentum", label: "Angular momentum", min: 0, max: 100, step: 5, format: v => `${v}%` },
   { key: "timeScale", label: "Overall speed", min: 0.1, max: 4, step: 0.1, format: v => `${v.toFixed(1)}×` },
 ];

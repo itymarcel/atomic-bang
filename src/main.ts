@@ -33,10 +33,12 @@ try {
   throw error;
 }
 
+let writeURLTimer = 0;
 const ui = new UI(config, next => {
   Object.assign(config, next);
   universe.setConfig(next);
-  writeURL(config);
+  clearTimeout(writeURLTimer);
+  writeURLTimer = setTimeout(() => writeURL(config), 300);
 });
 
 writeURL(config);
