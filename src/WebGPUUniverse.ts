@@ -250,7 +250,7 @@ export class WebGPUUniverse {
     pass.setPipeline(this.clearPipeline); pass.setBindGroup(0, this.clearGroup); pass.dispatchWorkgroups(gridGroups);
     pass.setPipeline(this.depositPipeline); pass.setBindGroup(0, this.depositGroup); pass.dispatchWorkgroups(particleGroups);
     pass.setPipeline(this.jacobiPipeline);
-    for (let iteration = 0; iteration < 20; iteration++) {
+    for (let iteration = 0; iteration < 32; iteration++) {
       pass.setBindGroup(0, iteration % 2 === 0 ? this.jacobiAB : this.jacobiBA);
       pass.dispatchWorkgroups(gridGroups);
     }
