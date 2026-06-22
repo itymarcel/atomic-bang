@@ -241,8 +241,8 @@ fn postIntegrate(@builtin(global_invocation_id) gid: vec3u) {
 
   // Black hole gravity (1/r²) + absorption. Strength is domain²-scaled.
   let bhDom2 = params.domain * params.domain;
-  let bhG = bhDom2 * 0.002;
-  let bhSoft2 = max(36.0, bhDom2 * 0.0009);
+  let bhG = bhDom2 * 0.0008;
+  let bhSoft2 = max(4.0, bhDom2 * 0.0002);
   for (var k = 0u; k < bh.count; k++) {
     let hole = bh.holes[k];
     let delta = hole.xyz - particles[i].position.xyz;
@@ -428,30 +428,51 @@ fn bhVertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) ->
   return out;
 }
 
-// Pass 1: semi-transparent shadow inside the accretion ring only.
-// Drawn with standard alpha blend so particles behind are dimmed but visible.
-@fragment
-fn bhDiscFragment(input: BHOutput) -> @location(0) vec4f {
-  let r = length(input.uv);
-  // Fade out right at the inner edge of the ring (ring center=0.62, inner edge≈0.44)
-  let alpha = smoothstep(0.5, 0.34, r) * 0.6;
-  if (alpha < 0.01) { discard; }
-  return vec4f(0.0, 0.0, 0.0, alpha);
-}
-
-// Pass 2: additive glowing ring on top of the black disc.
 @fragment
 fn bhFragment(input: BHOutput) -> @location(0) vec4f {
   let r = length(input.uv);
   if (r > 1.0) { discard; }
-  // Accretion ring: bright orange-white band around event horizon
   let ringDist = abs(r - 0.62);
   let ring = max(0.0, 1.0 - ringDist / 0.18);
   let ringColor = mix(vec3f(1.0, 0.45, 0.08), vec3f(1.0, 0.92, 0.65), ring * ring);
-  // Outer gravitational haze
   let haze = smoothstep(1.0, 0.72, r) * 0.18;
   let alpha = ring * 0.92 + haze * (1.0 - ring * 0.7);
   if (alpha < 0.005) { discard; }
   return vec4f(ringColor * ring + vec3f(0.55, 0.18, 0.0) * haze, alpha);
+}
+
+// Gravitational lens post-process — full-screen blit that warps pixels toward each BH.
+// 1/r² deflection in normalised BH-radius coordinates; naturally creates dark
+// event horizon (over-deflected interior samples empty space) + warp field outside.
+@group(0) @binding(2) var sceneTex: texture_2d<f32>;
+@group(0) @binding(3) var sceneSamp: sampler;
+
+struct LensOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+
+@vertex fn lensVertex(@builtin(vertex_index) vi: u32) -> LensOut {
+  let c = array<vec2f,6>(vec2f(-1,-1),vec2f(1,-1),vec2f(-1,1),vec2f(-1,1),vec2f(1,-1),vec2f(1,1))[vi];
+  return LensOut(vec4f(c,0.0,1.0), c*vec2f(0.5,-0.5)+0.5);
+}
+
+@fragment fn lensFragment(in: LensOut) -> @location(0) vec4f {
+  let pixelPos = in.uv * params.viewport;
+  var offset = vec2f(0.0);
+  let focal = max(params.viewport.x, params.viewport.y) * 1.15;
+  for (var k = 0u; k < bh.count; k++) {
+    let hole = bh.holes[k];
+    let view = rotate(hole.xyz);
+    let perspective = focal / max(20.0, focal + view.z * params.zoom) * params.zoom;
+    let bhScreen = params.viewport * 0.5 + params.pan + view.xy * perspective;
+    let worldRadius = 5.0 + hole.w * 2.0;
+    let pixelRadius = max(6.0, worldRadius * perspective);
+    let toPixel = pixelPos - bhScreen;
+    let dist = max(length(toPixel), 0.5);
+    let normDist = dist / pixelRadius;
+    // 1/r² deflection capped at inner horizon to avoid singularity
+    let lensForce = 1.0 / max(normDist * normDist, 0.04);
+    offset -= (toPixel / dist) * lensForce * pixelRadius * 0.35;
+  }
+  let sampleUV = clamp((pixelPos + offset) / params.viewport, vec2f(0.0), vec2f(1.0));
+  return textureSample(sceneTex, sceneSamp, sampleUV);
 }
 `;

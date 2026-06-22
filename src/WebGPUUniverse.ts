@@ -4,7 +4,7 @@ import { GPU_SHADER, GRID_SHADER, POISSON_SHADER, POST_SHADER, RENDER_SHADER, BH
 
 type Phase = "ready" | "approach" | "running";
 
-interface BlackHole { x: number; y: number; z: number; mass: number; vx: number; vy: number; vz: number; }
+interface BlackHole { x: number; y: number; z: number; mass: number; displayMass: number; vx: number; vy: number; vz: number; }
 
 export class WebGPUUniverse {
   static readonly MAX_PARTICLES = 2_000_000;
@@ -46,6 +46,7 @@ export class WebGPUUniverse {
   private potentialA!: GPUBuffer;
   private potentialB!: GPUBuffer;
   private bhBuffer!: GPUBuffer;
+  private bhRenderBuffer!: GPUBuffer;
   private bhAccumBuffer!: GPUBuffer;
   private bhAccumReadback!: GPUBuffer;
   private initializePipeline!: GPUComputePipeline;
@@ -56,8 +57,8 @@ export class WebGPUUniverse {
   private postPipeline!: GPUComputePipeline;
   private particlePipeline!: GPURenderPipeline;
   private atomPipeline!: GPURenderPipeline;
-  private bhDiscPipeline!: GPURenderPipeline;
   private bhPipeline!: GPURenderPipeline;
+  private lensPipeline!: GPURenderPipeline;
   private initializeGroup!: GPUBindGroup;
   private preGroup!: GPUBindGroup;
   private clearGroup!: GPUBindGroup;
@@ -67,8 +68,11 @@ export class WebGPUUniverse {
   private postGroup!: GPUBindGroup;
   private particleRenderGroup!: GPUBindGroup;
   private atomRenderGroup!: GPUBindGroup;
-  private bhDiscRenderGroup!: GPUBindGroup;
   private bhRenderGroup!: GPUBindGroup;
+  private lensRenderGroup!: GPUBindGroup;
+  private sceneTexture!: GPUTexture;
+  private sceneView!: GPUTextureView;
+  private sceneSampler!: GPUSampler;
 
   static async create(canvas: HTMLCanvasElement, config: SimulationConfig): Promise<WebGPUUniverse> {
     const gpu = navigator.gpu;
@@ -108,7 +112,7 @@ export class WebGPUUniverse {
 
   placeBlackHole(x: number, y: number, z: number, mass: number): void {
     if (this.blackHoles.length >= 8) this.blackHoles.shift();
-    this.blackHoles.push({ x, y, z, mass, vx: 0, vy: 0, vz: 0 });
+    this.blackHoles.push({ x, y, z, mass, displayMass: 0, vx: 0, vy: 0, vz: 0 });
   }
 
   resize(): void {
@@ -118,6 +122,7 @@ export class WebGPUUniverse {
     this.canvas.style.width = `${innerWidth}px`;
     this.canvas.style.height = `${innerHeight}px`;
     this.context.configure({ device: this.device, format: this.format, alphaMode: "opaque" });
+    if (this.lensPipeline) this.recreateSceneTexture();
   }
 
   frame(realDt: number): void {
@@ -164,6 +169,9 @@ export class WebGPUUniverse {
     this.device.queue.submit([encoder.finish()]);
     if (absorb) void this.resolveBhAbsorption();
     if (steps > 0) this.updateBlackHolePhysics(steps);
+    for (const bh of this.blackHoles) {
+      bh.displayMass += (bh.mass - bh.displayMass) * 0.1;
+    }
   }
 
   private initializeResources(): void {
@@ -175,8 +183,10 @@ export class WebGPUUniverse {
     this.potentialA = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 4, usage });
     this.potentialB = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 4, usage });
     this.bhBuffer = this.device.createBuffer({ size: WebGPUUniverse.BH_BUFFER_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.bhRenderBuffer = this.device.createBuffer({ size: WebGPUUniverse.BH_BUFFER_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bhAccumBuffer = this.device.createBuffer({ size: WebGPUUniverse.BH_ACCUM_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.bhAccumReadback = this.device.createBuffer({ size: WebGPUUniverse.BH_ACCUM_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    this.sceneSampler = this.device.createSampler({ minFilter: "linear", magFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
 
     const particleModule = this.device.createShaderModule({ code: GPU_SHADER });
     const gridModule = this.device.createShaderModule({ code: GRID_SHADER });
@@ -192,7 +202,6 @@ export class WebGPUUniverse {
     this.postPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: postModule, entryPoint: "postIntegrate" } });
 
     const blend = { color: { srcFactor: "src-alpha", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one", operation: "add" } };
-    const blendOver = { color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } };
     this.particlePipeline = this.device.createRenderPipeline({
       layout: "auto", vertex: { module: renderModule, entryPoint: "particleVertex" },
       fragment: { module: renderModule, entryPoint: "particleFragment", targets: [{ format: this.format, blend }] },
@@ -203,14 +212,14 @@ export class WebGPUUniverse {
       fragment: { module: renderModule, entryPoint: "atomFragment", targets: [{ format: this.format, blend }] },
       primitive: { topology: "triangle-list" },
     });
-    this.bhDiscPipeline = this.device.createRenderPipeline({
-      layout: "auto", vertex: { module: bhModule, entryPoint: "bhVertex" },
-      fragment: { module: bhModule, entryPoint: "bhDiscFragment", targets: [{ format: this.format, blend: blendOver }] },
-      primitive: { topology: "triangle-list" },
-    });
     this.bhPipeline = this.device.createRenderPipeline({
       layout: "auto", vertex: { module: bhModule, entryPoint: "bhVertex" },
       fragment: { module: bhModule, entryPoint: "bhFragment", targets: [{ format: this.format, blend }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.lensPipeline = this.device.createRenderPipeline({
+      layout: "auto", vertex: { module: bhModule, entryPoint: "lensVertex" },
+      fragment: { module: bhModule, entryPoint: "lensFragment", targets: [{ format: this.format }] },
       primitive: { topology: "triangle-list" },
     });
 
@@ -240,11 +249,26 @@ export class WebGPUUniverse {
     this.atomRenderGroup = this.device.createBindGroup({ layout: this.atomPipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: params },
     ] });
-    const bhEntries = [
-      { binding: 0, resource: params }, { binding: 1, resource: { buffer: this.bhBuffer } },
-    ];
-    this.bhDiscRenderGroup = this.device.createBindGroup({ layout: this.bhDiscPipeline.getBindGroupLayout(0), entries: bhEntries });
-    this.bhRenderGroup = this.device.createBindGroup({ layout: this.bhPipeline.getBindGroupLayout(0), entries: bhEntries });
+    this.bhRenderGroup = this.device.createBindGroup({ layout: this.bhPipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: params }, { binding: 1, resource: { buffer: this.bhRenderBuffer } },
+    ] });
+    this.recreateSceneTexture();
+  }
+
+  private recreateSceneTexture(): void {
+    if (this.sceneTexture) this.sceneTexture.destroy();
+    this.sceneTexture = this.device.createTexture({
+      size: [this.canvas.width, this.canvas.height],
+      format: this.format as GPUTextureFormat,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.sceneView = this.sceneTexture.createView();
+    this.lensRenderGroup = this.device.createBindGroup({ layout: this.lensPipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: { buffer: this.paramsBuffer } },
+      { binding: 1, resource: { buffer: this.bhRenderBuffer } },
+      { binding: 2, resource: this.sceneView },
+      { binding: 3, resource: this.sceneSampler },
+    ] });
   }
 
   private makeJacobiGroup(input: GPUBuffer, output: GPUBuffer): GPUBindGroup {
@@ -264,7 +288,7 @@ export class WebGPUUniverse {
     pass.setPipeline(this.clearPipeline); pass.setBindGroup(0, this.clearGroup); pass.dispatchWorkgroups(gridGroups);
     pass.setPipeline(this.depositPipeline); pass.setBindGroup(0, this.depositGroup); pass.dispatchWorkgroups(particleGroups);
     pass.setPipeline(this.jacobiPipeline);
-    for (let iteration = 0; iteration < 64; iteration++) {
+    for (let iteration = 0; iteration < 128; iteration++) {
       pass.setBindGroup(0, iteration % 2 === 0 ? this.jacobiAB : this.jacobiBA);
       pass.dispatchWorkgroups(gridGroups);
     }
@@ -273,29 +297,36 @@ export class WebGPUUniverse {
   }
 
   private encodeRender(encoder: GPUCommandEncoder): void {
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: this.context.getCurrentTexture().createView(), clearValue: { r: .004, g: .006, b: .012, a: 1 }, loadOp: "clear", storeOp: "store" }],
+    // Pass 1: render scene (particles + BH rings) into intermediate texture
+    const scene = encoder.beginRenderPass({
+      colorAttachments: [{ view: this.sceneView, clearValue: { r: .004, g: .006, b: .012, a: 1 }, loadOp: "clear", storeOp: "store" }],
     });
     if (this.phase === "approach") {
-      pass.setPipeline(this.atomPipeline); pass.setBindGroup(0, this.atomRenderGroup); pass.draw(6, 2);
+      scene.setPipeline(this.atomPipeline); scene.setBindGroup(0, this.atomRenderGroup); scene.draw(6, 2);
     } else if (this.phase === "running" && this.count > 0) {
-      pass.setPipeline(this.particlePipeline); pass.setBindGroup(0, this.particleRenderGroup); pass.draw(6, Math.min(this.count, 350000));
+      scene.setPipeline(this.particlePipeline); scene.setBindGroup(0, this.particleRenderGroup); scene.draw(6, Math.min(this.count, 350000));
     }
     if (this.blackHoles.length > 0) {
-      // Draw opaque black disc first to occlude particles behind the BH
-      pass.setPipeline(this.bhDiscPipeline); pass.setBindGroup(0, this.bhDiscRenderGroup); pass.draw(6, this.blackHoles.length);
-      // Then additive glowing ring on top
-      pass.setPipeline(this.bhPipeline); pass.setBindGroup(0, this.bhRenderGroup); pass.draw(6, this.blackHoles.length);
+      scene.setPipeline(this.bhPipeline); scene.setBindGroup(0, this.bhRenderGroup); scene.draw(6, this.blackHoles.length);
     }
-    pass.end();
+    scene.end();
+
+    // Pass 2: gravitational lens post-process → swapchain
+    const lensPass = encoder.beginRenderPass({
+      colorAttachments: [{ view: this.context.getCurrentTexture().createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+    });
+    lensPass.setPipeline(this.lensPipeline);
+    lensPass.setBindGroup(0, this.lensRenderGroup);
+    lensPass.draw(6);
+    lensPass.end();
   }
 
   private updateBlackHolePhysics(steps: number): void {
     if (this.blackHoles.length === 0) return;
     const dt = 1 / 60;
     const domain = Math.max(8, 8 + this.age * this.config.impactSpeed * 1.12);
-    const bhG = domain * domain * 0.002;
-    const bhSoft2 = Math.max(36, domain * domain * 0.0009);
+    const bhG = domain * domain * 0.0008;
+    const bhSoft2 = Math.max(4, domain * domain * 0.0002);
 
     for (let s = 0; s < steps; s++) {
       // Merge BHs that overlap (momentum-conserving)
@@ -363,18 +394,24 @@ export class WebGPUUniverse {
   }
 
   private writeBhBuffer(): void {
-    const data = new ArrayBuffer(WebGPUUniverse.BH_BUFFER_BYTES);
-    const view = new DataView(data);
-    view.setUint32(0, this.blackHoles.length, true);
-    for (let i = 0; i < this.blackHoles.length; i++) {
+    const n = this.blackHoles.length;
+    const physData = new ArrayBuffer(WebGPUUniverse.BH_BUFFER_BYTES);
+    const rendData = new ArrayBuffer(WebGPUUniverse.BH_BUFFER_BYTES);
+    const pv = new DataView(physData), rv = new DataView(rendData);
+    pv.setUint32(0, n, true); rv.setUint32(0, n, true);
+    for (let i = 0; i < n; i++) {
       const bh = this.blackHoles[i];
       const off = 16 + i * 16;
-      view.setFloat32(off, bh.x, true);
-      view.setFloat32(off + 4, bh.y, true);
-      view.setFloat32(off + 8, bh.z, true);
-      view.setFloat32(off + 12, bh.mass, true);
+      for (const v of [pv, rv]) {
+        v.setFloat32(off, bh.x, true);
+        v.setFloat32(off + 4, bh.y, true);
+        v.setFloat32(off + 8, bh.z, true);
+      }
+      pv.setFloat32(off + 12, bh.mass, true);        // physics: true mass
+      rv.setFloat32(off + 12, bh.displayMass, true); // render: smooth visual mass
     }
-    this.device.queue.writeBuffer(this.bhBuffer, 0, data);
+    this.device.queue.writeBuffer(this.bhBuffer, 0, physData);
+    this.device.queue.writeBuffer(this.bhRenderBuffer, 0, rendData);
   }
 
   private writeParams(dt: number): void {

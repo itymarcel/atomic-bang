@@ -111,12 +111,22 @@ canvas.addEventListener("pointercancel", () => {
   bhRing.style.display = "none";
 });
 
+const statFps = document.querySelector<HTMLSpanElement>("#stat-fps")!;
+const statTime = document.querySelector<HTMLSpanElement>("#stat-time")!;
+let fps = 60;
+
 let previous = performance.now();
 function frame(now: number): void {
   const dt = Math.min((now - previous) / 1000, .033);
   previous = now;
   universe.frame(dt);
   ui.update(universe.paused);
+
+  fps = fps * 0.9 + (1 / Math.max(dt, 0.001)) * 0.1;
+  statFps.textContent = `${Math.round(fps)} fps`;
+  const age = universe.age;
+  const m = Math.floor(age / 60), s = Math.floor(age % 60);
+  statTime.textContent = `${m}:${String(s).padStart(2, "0")}`;
 
   // Animate BH sizing ring during hold
   if (bhDown && !bhMoved) {
