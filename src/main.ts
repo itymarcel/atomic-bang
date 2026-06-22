@@ -43,9 +43,15 @@ const ui = new UI(config, next => {
 
 writeURL(config);
 
+const rotateBtn = document.querySelector<HTMLButtonElement>("#rotate")!;
+
 addEventListener("resize", () => universe.resize());
 document.querySelector("#trigger")!.addEventListener("click", () => universe.trigger());
 document.querySelector("#pause")!.addEventListener("click", () => universe.togglePause());
+rotateBtn.addEventListener("click", () => {
+  universe.camera.autoRotate = !universe.camera.autoRotate;
+  rotateBtn.classList.toggle("active", universe.camera.autoRotate);
+});
 addEventListener("keydown", event => {
   if (event.code === "Space" && event.target === document.body) {
     event.preventDefault();

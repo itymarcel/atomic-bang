@@ -58,9 +58,11 @@ fn initialize(@builtin(global_invocation_id) gid: vec3u) {
   let spinAxis = normalize(vec3f(0.31, 0.19, 0.931));
   let tangentRaw = cross(spinAxis, direction);
   let tangent = tangentRaw / max(length(tangentRaw), 0.001);
-  // Core particles get a 2× tangential boost so they orbit instead of radially collapsing.
+  // Tangential speed: flat-rotation-curve profile (v ∝ sqrt(r) at small r,
+  // constant at large r). Core gets 2× boost so it orbits rather than collapses.
   let coreSpinFactor = select(1.0, 2.0, core);
-  let spinSpeed = params.explosion * params.spin * (0.14 + 0.22 * pow(radialDistribution, 0.45)) * coreSpinFactor;
+  let rotationProfile = 0.18 * pow(radialDistribution + 0.08, 0.5) / pow(0.08, 0.5);
+  let spinSpeed = params.explosion * params.spin * rotationProfile * coreSpinFactor;
   let noise = vec3f(random(i * 37u + 11u), random(i * 41u + 13u), random(i * 43u + 17u)) * 2.0 - 1.0;
   let velocity = direction * params.explosion * expansionMultiplier + tangent * spinSpeed + noise * params.explosion * params.entropy * 0.012;
 

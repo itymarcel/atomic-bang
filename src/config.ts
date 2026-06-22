@@ -36,6 +36,6 @@ export const CONTROL_DEFINITIONS: ControlDefinition[] = [
   { key: "sizeVariation", label: "Luminosity spectrum", min: 0, max: 200, step: 2, format: v => `${v}%` },
   { key: "lifetime", label: "Mean lifetime", min: 10, max: 600, step: 10, format: v => `${v}s` },
   { key: "randomness", label: "Entropy", min: 0, max: 100, step: 1, format: v => `${v}%` },
-  { key: "angularMomentum", label: "Angular momentum", min: 0, max: 100, step: 5, format: v => `${v}%` },
+  { key: "angularMomentum", label: "Initial rotation", min: 0, max: 100, step: 5, format: v => `${v}%` },
   { key: "timeScale", label: "Overall speed", min: 0.1, max: 4, step: 0.1, format: v => `${v.toFixed(1)}×` },
 ];

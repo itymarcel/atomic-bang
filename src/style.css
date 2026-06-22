@@ -15,5 +15,6 @@ button { border: 0; cursor: pointer; color: #111; }
 .trigger:hover { background: #ff8b63; }
 .trigger:active { transform: translateY(1px); }
 .icon-button { width: 43px; background: transparent; color: #c9cdd3; border: 1px solid rgba(255,255,255,.14); }
+.icon-button.active { background: rgba(255,138,80,.14); color: #ff8a5f; border-color: rgba(255,138,80,.38); }
 @media (max-height: 760px) { .panel { top: 10px; transform: scale(.88); transform-origin: top left; } }
 @media (max-width: 650px) { .panel { left: 14px; right: 14px; width: auto; top: 14px; max-height: calc(100vh - 28px); overflow: auto; } }

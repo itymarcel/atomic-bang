@@ -4,6 +4,7 @@ export class OrbitCamera {
   zoom = 1;
   panX = 0;
   panY = 0;
+  autoRotate = false;
   projectedX = 0;
   projectedY = 0;
   projectedScale = 1;
@@ -48,6 +49,10 @@ export class OrbitCamera {
         this.panY -= vertical * unit * dpr;
       }
     }, { passive: false });
+  }
+
+  tick(dt: number): void {
+    if (this.autoRotate && !this.dragging) this.yaw += dt * 0.083;
   }
 
   prepare(): void {

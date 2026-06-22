@@ -124,6 +124,7 @@ export class WebGPUUniverse {
   }
 
   frame(realDt: number): void {
+    this.camera.tick(realDt);
     const encoder = this.device.createCommandEncoder();
     let steps = 0;
     if (!this.paused) {
