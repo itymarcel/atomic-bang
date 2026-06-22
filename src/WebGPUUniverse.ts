@@ -45,6 +45,7 @@ export class WebGPUUniverse {
   private massBuffer!: GPUBuffer;
   private potentialA!: GPUBuffer;
   private potentialB!: GPUBuffer;
+  private gradientBuffer!: GPUBuffer;
   private bhBuffer!: GPUBuffer;
   private bhRenderBuffer!: GPUBuffer;
   private bhAccumBuffer!: GPUBuffer;
@@ -54,6 +55,7 @@ export class WebGPUUniverse {
   private clearPipeline!: GPUComputePipeline;
   private depositPipeline!: GPUComputePipeline;
   private jacobiPipeline!: GPUComputePipeline;
+  private gradientPipeline!: GPUComputePipeline;
   private postPipeline!: GPUComputePipeline;
   private particlePipeline!: GPURenderPipeline;
   private atomPipeline!: GPURenderPipeline;
@@ -65,6 +67,7 @@ export class WebGPUUniverse {
   private depositGroup!: GPUBindGroup;
   private jacobiAB!: GPUBindGroup;
   private jacobiBA!: GPUBindGroup;
+  private gradientGroup!: GPUBindGroup;
   private postGroup!: GPUBindGroup;
   private particleRenderGroup!: GPUBindGroup;
   private atomRenderGroup!: GPUBindGroup;
@@ -182,6 +185,7 @@ export class WebGPUUniverse {
     this.massBuffer = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 4, usage });
     this.potentialA = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 4, usage });
     this.potentialB = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 4, usage });
+    this.gradientBuffer = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 16, usage });
     this.bhBuffer = this.device.createBuffer({ size: WebGPUUniverse.BH_BUFFER_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bhRenderBuffer = this.device.createBuffer({ size: WebGPUUniverse.BH_BUFFER_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.bhAccumBuffer = this.device.createBuffer({ size: WebGPUUniverse.BH_ACCUM_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
@@ -198,7 +202,8 @@ export class WebGPUUniverse {
     this.prePipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: particleModule, entryPoint: "preIntegrate" } });
     this.clearPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: gridModule, entryPoint: "clearMass" } });
     this.depositPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: gridModule, entryPoint: "deposit" } });
-    this.jacobiPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: poissonModule, entryPoint: "jacobi" } });
+    this.jacobiPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: poissonModule, entryPoint: "jacobiPair" } });
+    this.gradientPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: poissonModule, entryPoint: "calculateGradient" } });
     this.postPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: postModule, entryPoint: "postIntegrate" } });
 
     const blend = { color: { srcFactor: "src-alpha", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one", operation: "add" } };
@@ -238,9 +243,13 @@ export class WebGPUUniverse {
     ] });
     this.jacobiAB = this.makeJacobiGroup(this.potentialA, this.potentialB);
     this.jacobiBA = this.makeJacobiGroup(this.potentialB, this.potentialA);
+    this.gradientGroup = this.device.createBindGroup({ layout: this.gradientPipeline.getBindGroupLayout(0), entries: [
+      { binding: 0, resource: params }, { binding: 2, resource: { buffer: this.potentialA } },
+      { binding: 4, resource: { buffer: this.gradientBuffer } },
+    ] });
     this.postGroup = this.device.createBindGroup({ layout: this.postPipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: params }, { binding: 1, resource: particles }, { binding: 2, resource: accelerations },
-      { binding: 3, resource: { buffer: this.potentialA } }, { binding: 4, resource: { buffer: this.bhBuffer } },
+      { binding: 3, resource: { buffer: this.gradientBuffer } }, { binding: 4, resource: { buffer: this.bhBuffer } },
       { binding: 5, resource: { buffer: this.bhAccumBuffer } },
     ] });
     this.particleRenderGroup = this.device.createBindGroup({ layout: this.particlePipeline.getBindGroupLayout(0), entries: [
@@ -288,18 +297,22 @@ export class WebGPUUniverse {
     pass.setPipeline(this.clearPipeline); pass.setBindGroup(0, this.clearGroup); pass.dispatchWorkgroups(gridGroups);
     pass.setPipeline(this.depositPipeline); pass.setBindGroup(0, this.depositGroup); pass.dispatchWorkgroups(particleGroups);
     pass.setPipeline(this.jacobiPipeline);
-    for (let iteration = 0; iteration < 128; iteration++) {
-      pass.setBindGroup(0, iteration % 2 === 0 ? this.jacobiAB : this.jacobiBA);
-      pass.dispatchWorkgroups(gridGroups);
+    for (let pair = 0; pair < 64; pair++) {
+      pass.setBindGroup(0, pair % 2 === 0 ? this.jacobiAB : this.jacobiBA);
+      pass.dispatchWorkgroups(4, 4, 8);
     }
+    pass.setPipeline(this.gradientPipeline); pass.setBindGroup(0, this.gradientGroup); pass.dispatchWorkgroups(gridGroups);
     pass.setPipeline(this.postPipeline); pass.setBindGroup(0, this.postGroup); pass.dispatchWorkgroups(particleGroups);
     pass.end();
   }
 
   private encodeRender(encoder: GPUCommandEncoder): void {
-    // Pass 1: render scene (particles + BH rings) into intermediate texture
+    const lensing = this.blackHoles.length > 0;
+    const outputView = this.context.getCurrentTexture().createView();
+
+    // Render directly to the swapchain unless a black hole needs the lens pass.
     const scene = encoder.beginRenderPass({
-      colorAttachments: [{ view: this.sceneView, clearValue: { r: .004, g: .006, b: .012, a: 1 }, loadOp: "clear", storeOp: "store" }],
+      colorAttachments: [{ view: lensing ? this.sceneView : outputView, clearValue: { r: .004, g: .006, b: .012, a: 1 }, loadOp: "clear", storeOp: "store" }],
     });
     if (this.phase === "approach") {
       scene.setPipeline(this.atomPipeline); scene.setBindGroup(0, this.atomRenderGroup); scene.draw(6, 2);
@@ -311,9 +324,11 @@ export class WebGPUUniverse {
     }
     scene.end();
 
+    if (!lensing) return;
+
     // Pass 2: gravitational lens post-process → swapchain
     const lensPass = encoder.beginRenderPass({
-      colorAttachments: [{ view: this.context.getCurrentTexture().createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+      colorAttachments: [{ view: outputView, clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
     });
     lensPass.setPipeline(this.lensPipeline);
     lensPass.setBindGroup(0, this.lensRenderGroup);

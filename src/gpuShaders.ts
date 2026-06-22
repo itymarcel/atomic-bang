@@ -58,8 +58,6 @@ fn initialize(@builtin(global_invocation_id) gid: vec3u) {
   let spinAxis = normalize(vec3f(0.31, 0.19, 0.931));
   let tangentRaw = cross(spinAxis, direction);
   let tangent = tangentRaw / max(length(tangentRaw), 0.001);
-  // Tangential speed: flat-rotation-curve profile (v ∝ sqrt(r) at small r,
-  // constant at large r). Core gets 2× boost so it orbits rather than collapses.
   let coreSpinFactor = select(1.0, 2.0, core);
   let rotationProfile = 0.18 * pow(radialDistribution + 0.08, 0.5) / pow(0.08, 0.5);
   let spinSpeed = params.explosion * params.spin * rotationProfile * coreSpinFactor;
@@ -110,6 +108,7 @@ struct Particle { position: vec4f, velocity: vec4f }
 
 fn index3(p: vec3u) -> u32 { return p.x + p.y * params.gridSide + p.z * params.gridSide * params.gridSide; }
 
+
 @compute @workgroup_size(256)
 fn clearMass(@builtin(global_invocation_id) gid: vec3u) {
   let cells = params.gridSide * params.gridSide * params.gridSide;
@@ -130,7 +129,8 @@ fn deposit(@builtin(global_invocation_id) gid: vec3u) {
         let offset = vec3u(x, y, z);
         let cell = min(base + offset, vec3u(params.gridSide - 1u));
         let weight3 = select(vec3f(1.0) - fraction, fraction, offset == vec3u(1u));
-        let fixedWeight = u32(max(0.0, weight3.x * weight3.y * weight3.z * 256.0));
+        let starMass = max(0.4, pow(particles[i].position.w, 1.6)); // bigger = heavier, superlinear cheat
+        let fixedWeight = u32(max(0.0, weight3.x * weight3.y * weight3.z * starMass * 256.0));
         atomicAdd(&mass[index3(cell)], fixedWeight);
       }
     }
@@ -151,6 +151,7 @@ struct Params {
 @group(0) @binding(1) var<storage, read_write> mass: array<atomic<u32>>;
 @group(0) @binding(2) var<storage, read> inputPotential: array<f32>;
 @group(0) @binding(3) var<storage, read_write> outputPotential: array<f32>;
+@group(0) @binding(4) var<storage, read_write> outputGradient: array<vec4f>;
 
 fn index3(p: vec3u) -> u32 { return p.x + p.y * params.gridSide + p.z * params.gridSide * params.gridSide; }
 fn wrap(value: i32) -> u32 {
@@ -158,26 +159,115 @@ fn wrap(value: i32) -> u32 {
   return u32((value % side + side) % side);
 }
 
+const BLOCK_X = 8u;
+const BLOCK_Y = 8u;
+const BLOCK_Z = 4u;
+const INPUT_X = BLOCK_X + 4u;
+const INPUT_Y = BLOCK_Y + 4u;
+const INPUT_Z = BLOCK_Z + 4u;
+const INNER_X = BLOCK_X + 2u;
+const INNER_Y = BLOCK_Y + 2u;
+const INNER_Z = BLOCK_Z + 2u;
+
+var<workgroup> inputTile: array<f32, 1152>; // 12 * 12 * 8, two-cell halo
+var<workgroup> innerTile: array<f32, 600>;  // 10 * 10 * 6, one-cell halo
+
+fn inputIndex(x: u32, y: u32, z: u32) -> u32 {
+  return x + y * INPUT_X + z * INPUT_X * INPUT_Y;
+}
+
+fn innerIndex(x: u32, y: u32, z: u32) -> u32 {
+  return x + y * INNER_X + z * INNER_X * INNER_Y;
+}
+
+fn densityAt(cell: vec3u, spacing: f32, cells: u32) -> f32 {
+  let depositedMass = f32(atomicLoad(&mass[index3(cell)])) / 256.0;
+  let meanMass = f32(params.count) / f32(cells);
+  return (depositedMass - meanMass) / (spacing * spacing * spacing);
+}
+
+// Compute two mathematically identical Jacobi iterations per dispatch. The
+// two-cell halo makes the second iteration independent across workgroups.
+@compute @workgroup_size(8, 8, 4)
+fn jacobiPair(
+  @builtin(workgroup_id) workgroupId: vec3u,
+  @builtin(local_invocation_id) localId: vec3u,
+  @builtin(local_invocation_index) localIndex: u32,
+) {
+  let side = params.gridSide;
+  let cells = side * side * side;
+  let spacing = params.domain / f32(side - 1u);
+  let origin = vec3i(workgroupId * vec3u(BLOCK_X, BLOCK_Y, BLOCK_Z));
+
+  // Cooperatively stage the source potential, including the radius-two halo.
+  for (var tileIndex = localIndex; tileIndex < INPUT_X * INPUT_Y * INPUT_Z; tileIndex += 256u) {
+    let tx = tileIndex % INPUT_X;
+    let ty = (tileIndex / INPUT_X) % INPUT_Y;
+    let tz = tileIndex / (INPUT_X * INPUT_Y);
+    let cell = vec3u(
+      wrap(origin.x + i32(tx) - 2),
+      wrap(origin.y + i32(ty) - 2),
+      wrap(origin.z + i32(tz) - 2),
+    );
+    inputTile[tileIndex] = inputPotential[index3(cell)];
+  }
+  workgroupBarrier();
+
+  // First Jacobi iteration for the output tile and its one-cell halo.
+  for (var tileIndex = localIndex; tileIndex < INNER_X * INNER_Y * INNER_Z; tileIndex += 256u) {
+    let tx = tileIndex % INNER_X;
+    let ty = (tileIndex / INNER_X) % INNER_Y;
+    let tz = tileIndex / (INNER_X * INNER_Y);
+    let ix = tx + 1u;
+    let iy = ty + 1u;
+    let iz = tz + 1u;
+    let cell = vec3u(
+      wrap(origin.x + i32(tx) - 1),
+      wrap(origin.y + i32(ty) - 1),
+      wrap(origin.z + i32(tz) - 1),
+    );
+    let neighborSum =
+      inputTile[inputIndex(ix - 1u, iy, iz)] + inputTile[inputIndex(ix + 1u, iy, iz)] +
+      inputTile[inputIndex(ix, iy - 1u, iz)] + inputTile[inputIndex(ix, iy + 1u, iz)] +
+      inputTile[inputIndex(ix, iy, iz - 1u)] + inputTile[inputIndex(ix, iy, iz + 1u)];
+    innerTile[tileIndex] = (neighborSum - densityAt(cell, spacing, cells) * spacing * spacing) / 6.0;
+  }
+  workgroupBarrier();
+
+  // Second iteration writes only this workgroup's non-overlapping output tile.
+  let cell = workgroupId * vec3u(BLOCK_X, BLOCK_Y, BLOCK_Z) + localId;
+  if (all(cell < vec3u(side))) {
+    let ix = localId.x + 1u;
+    let iy = localId.y + 1u;
+    let iz = localId.z + 1u;
+    let neighborSum =
+      innerTile[innerIndex(ix - 1u, iy, iz)] + innerTile[innerIndex(ix + 1u, iy, iz)] +
+      innerTile[innerIndex(ix, iy - 1u, iz)] + innerTile[innerIndex(ix, iy + 1u, iz)] +
+      innerTile[innerIndex(ix, iy, iz - 1u)] + innerTile[innerIndex(ix, iy, iz + 1u)];
+    outputPotential[index3(cell)] = (neighborSum - densityAt(cell, spacing, cells) * spacing * spacing) / 6.0;
+  }
+}
+
 @compute @workgroup_size(256)
-fn jacobi(@builtin(global_invocation_id) gid: vec3u) {
+fn calculateGradient(@builtin(global_invocation_id) gid: vec3u) {
   let cells = params.gridSide * params.gridSide * params.gridSide;
   let i = gid.x;
   if (i >= cells) { return; }
   let side = params.gridSide;
-  let x = i % side;
-  let y = (i / side) % side;
-  let z = i / (side * side);
-  let left = index3(vec3u(wrap(i32(x) - 1), y, z));
-  let right = index3(vec3u(wrap(i32(x) + 1), y, z));
-  let down = index3(vec3u(x, wrap(i32(y) - 1), z));
-  let up = index3(vec3u(x, wrap(i32(y) + 1), z));
-  let back = index3(vec3u(x, y, wrap(i32(z) - 1)));
-  let front = index3(vec3u(x, y, wrap(i32(z) + 1)));
+  let cell = vec3u(i % side, (i / side) % side, i / (side * side));
   let spacing = params.domain / f32(side - 1u);
-  let depositedMass = f32(atomicLoad(&mass[i])) / 256.0;
-  let meanMass = f32(params.count) / f32(cells);
-  let density = (depositedMass - meanMass) / (spacing * spacing * spacing);
-  outputPotential[i] = (inputPotential[left] + inputPotential[right] + inputPotential[down] + inputPotential[up] + inputPotential[back] + inputPotential[front] - density * spacing * spacing) / 6.0;
+  let x0 = index3(vec3u(wrap(i32(cell.x) - 1), cell.y, cell.z));
+  let x1 = index3(vec3u(wrap(i32(cell.x) + 1), cell.y, cell.z));
+  let y0 = index3(vec3u(cell.x, wrap(i32(cell.y) - 1), cell.z));
+  let y1 = index3(vec3u(cell.x, wrap(i32(cell.y) + 1), cell.z));
+  let z0 = index3(vec3u(cell.x, cell.y, wrap(i32(cell.z) - 1)));
+  let z1 = index3(vec3u(cell.x, cell.y, wrap(i32(cell.z) + 1)));
+  let gradient = -vec3f(
+    inputPotential[x1] - inputPotential[x0],
+    inputPotential[y1] - inputPotential[y0],
+    inputPotential[z1] - inputPotential[z0],
+  ) / (2.0 * spacing);
+  outputGradient[i] = vec4f(gradient, 0.0);
 }
 `;
 
@@ -198,7 +288,7 @@ struct BlackHoles {
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(2) var<storage, read_write> accelerations: array<vec4f>;
-@group(0) @binding(3) var<storage, read> potential: array<f32>;
+@group(0) @binding(3) var<storage, read> gridGradients: array<vec4f>;
 @group(0) @binding(4) var<uniform> bh: BlackHoles;
 @group(0) @binding(5) var<storage, read_write> bhAccum: array<atomic<u32>, 8>;
 
@@ -207,17 +297,6 @@ fn wrap(value: i32) -> u32 {
   let side = i32(params.gridSide);
   return u32((value % side + side) % side);
 }
-fn gradient(cell: vec3u) -> vec3f {
-  let spacing = params.domain / f32(params.gridSide - 1u);
-  let x0 = index3(vec3u(wrap(i32(cell.x) - 1), cell.y, cell.z));
-  let x1 = index3(vec3u(wrap(i32(cell.x) + 1), cell.y, cell.z));
-  let y0 = index3(vec3u(cell.x, wrap(i32(cell.y) - 1), cell.z));
-  let y1 = index3(vec3u(cell.x, wrap(i32(cell.y) + 1), cell.z));
-  let z0 = index3(vec3u(cell.x, cell.y, wrap(i32(cell.z) - 1)));
-  let z1 = index3(vec3u(cell.x, cell.y, wrap(i32(cell.z) + 1)));
-  return -vec3f(potential[x1] - potential[x0], potential[y1] - potential[y0], potential[z1] - potential[z0]) / (2.0 * spacing);
-}
-
 @compute @workgroup_size(256)
 fn postIntegrate(@builtin(global_invocation_id) gid: vec3u) {
   let i = gid.x;
@@ -233,7 +312,7 @@ fn postIntegrate(@builtin(global_invocation_id) gid: vec3u) {
         let offset = vec3u(x, y, z);
         let cell = min(base + offset, vec3u(params.gridSide - 1u));
         let weight3 = select(vec3f(1.0) - fraction, fraction, offset == vec3u(1u));
-        acceleration += gradient(cell) * weight3.x * weight3.y * weight3.z;
+        acceleration += gridGradients[index3(cell)].xyz * weight3.x * weight3.y * weight3.z;
       }
     }
   }
