@@ -18,9 +18,9 @@ struct Params {
   pitch: f32,
   approach: f32,
   pan: vec2f,
-  focusId: u32,
   spin: f32,
-  _pad2: vec2f,
+  _pad2: f32,
+  _pad3: vec2f,
 }
 
 struct Particle { position: vec4f, velocity: vec4f }
@@ -100,7 +100,7 @@ struct Params {
   entropy: f32, lifetime: f32, spectrum: f32, domain: f32,
   viewport: vec2f, zoom: f32, yaw: f32,
   pitch: f32, approach: f32, pan: vec2f,
-  focusId: u32, spin: f32, _pad2: vec2f,
+  spin: f32, _pad2: f32, _pad3: vec2f,
 }
 struct Particle { position: vec4f, velocity: vec4f }
 @group(0) @binding(0) var<uniform> params: Params;
@@ -145,7 +145,7 @@ struct Params {
   entropy: f32, lifetime: f32, spectrum: f32, domain: f32,
   viewport: vec2f, zoom: f32, yaw: f32,
   pitch: f32, approach: f32, pan: vec2f,
-  focusId: u32, spin: f32, _pad2: vec2f,
+  spin: f32, _pad2: f32, _pad3: vec2f,
 }
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> mass: array<atomic<u32>>;
@@ -188,13 +188,19 @@ struct Params {
   entropy: f32, lifetime: f32, spectrum: f32, domain: f32,
   viewport: vec2f, zoom: f32, yaw: f32,
   pitch: f32, approach: f32, pan: vec2f,
-  focusId: u32, spin: f32, _pad2: vec2f,
+  spin: f32, _pad2: f32, _pad3: vec2f,
 }
 struct Particle { position: vec4f, velocity: vec4f }
+struct BlackHoles {
+  count: u32, _p0: u32, _p1: u32, _p2: u32,
+  holes: array<vec4f, 8>,
+}
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read_write> particles: array<Particle>;
 @group(0) @binding(2) var<storage, read_write> accelerations: array<vec4f>;
 @group(0) @binding(3) var<storage, read> potential: array<f32>;
+@group(0) @binding(4) var<uniform> bh: BlackHoles;
+@group(0) @binding(5) var<storage, read_write> bhAccum: array<atomic<u32>, 8>;
 
 fn index3(p: vec3u) -> u32 { return p.x + p.y * params.gridSide + p.z * params.gridSide * params.gridSide; }
 fn wrap(value: i32) -> u32 {
@@ -232,6 +238,26 @@ fn postIntegrate(@builtin(global_invocation_id) gid: vec3u) {
     }
   }
   acceleration *= params.gravity;
+
+  // Black hole gravity (1/r²) + absorption. Strength is domain²-scaled.
+  let bhDom2 = params.domain * params.domain;
+  let bhG = bhDom2 * 0.002;
+  let bhSoft2 = max(36.0, bhDom2 * 0.0009);
+  for (var k = 0u; k < bh.count; k++) {
+    let hole = bh.holes[k];
+    let delta = hole.xyz - particles[i].position.xyz;
+    let actualDist2 = dot(delta, delta);
+    // Absorb particle if inside the event horizon radius
+    let absRadius = max(2.0, hole.w * 0.4);
+    if (actualDist2 < absRadius * absRadius) {
+      atomicAdd(&bhAccum[k], 1u);
+      accelerations[i].w = 0.0;
+      return;
+    }
+    let dist2 = max(actualDist2, bhSoft2);
+    acceleration += normalize(delta) * hole.w * bhG / dist2;
+  }
+
   var velocity = particles[i].velocity.xyz + acceleration * params.dt * 0.5;
   if (accelerations[i].w < 0.0) {
     let a2 = dot(acceleration, acceleration);
@@ -251,7 +277,7 @@ struct Params {
   entropy: f32, lifetime: f32, spectrum: f32, domain: f32,
   viewport: vec2f, zoom: f32, yaw: f32,
   pitch: f32, approach: f32, pan: vec2f,
-  focusId: u32, spin: f32, _pad2: vec2f,
+  spin: f32, _pad2: f32, _pad3: vec2f,
 }
 struct Particle { position: vec4f, velocity: vec4f }
 @group(0) @binding(0) var<uniform> params: Params;
@@ -263,7 +289,6 @@ struct VertexOutput {
   @location(0) uv: vec2f,
   @location(1) color: vec4f,
   @location(2) aura: f32,
-  @location(3) focused: f32,
 }
 
 fn rotate(point: vec3f) -> vec3f {
@@ -278,17 +303,13 @@ fn rotate(point: vec3f) -> vec3f {
 fn particleVertex(@builtin(vertex_index) vertexId: u32, @builtin(instance_index) instanceId: u32) -> VertexOutput {
   let corners = array<vec2f, 6>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(-1,1), vec2f(1,-1), vec2f(1,1));
   let particle = particles[instanceId];
-  var focus = vec3f(0.0);
-  if (params.focusId < params.count) { focus = particles[params.focusId].position.xyz; }
-  let view = rotate(particle.position.xyz - focus);
+  let view = rotate(particle.position.xyz);
   let focal = max(params.viewport.x, params.viewport.y) * 1.15;
   let perspective = focal / max(20.0, focal + view.z * params.zoom) * params.zoom;
   let center = params.viewport * 0.5 + params.pan + view.xy * perspective;
   let aura = select(0.0, 1.0, particle.position.w > 3.0);
-  let isFocused = params.focusId < params.count && instanceId == params.focusId;
   let baseRadius = max(0.65, particle.position.w * perspective) * select(1.0, 3.5, aura > 0.5);
-  let pixelRadius = select(baseRadius, max(baseRadius, 20.0), isFocused);
-  let screen = center + corners[vertexId] * pixelRadius;
+  let screen = center + corners[vertexId] * baseRadius;
   var output: VertexOutput;
   output.position = vec4f(screen.x / params.viewport.x * 2.0 - 1.0, 1.0 - screen.y / params.viewport.y * 2.0, 0.0, 1.0);
   output.uv = corners[vertexId];
@@ -319,7 +340,6 @@ fn particleVertex(@builtin(vertex_index) vertexId: u32, @builtin(instance_index)
   output.color = vec4f(rgb, 0.68 * fadeIn);
 
   output.aura = aura;
-  output.focused = select(0.0, 1.0, isFocused);
   if (abs(accelerations[instanceId].w) <= 0.0) { output.position = vec4f(2.0, 2.0, 0.0, 1.0); }
   return output;
 }
@@ -331,14 +351,8 @@ fn particleFragment(input: VertexOutput) -> @location(0) vec4f {
   let core = 1.0 - smoothstep(0.0, 1.0, radius);
   let alpha = select(smoothstep(1.0, 0.15, radius) * input.color.a, pow(core, 1.7) * .72, input.aura > .5);
   let auraColor = mix(vec3f(1.0, .38, .12), vec3f(1.0, .96, .72), pow(core, 2.0));
-  var finalColor = select(input.color.rgb, auraColor, input.aura > .5);
-  var finalAlpha = alpha;
-  if (input.focused > 0.5) {
-    let ring = smoothstep(0.1, 0.0, abs(radius - 0.78));
-    finalColor = mix(finalColor, vec3f(1.0, 1.0, 1.0), ring * 0.9);
-    finalAlpha = max(finalAlpha, ring * 0.75);
-  }
-  return vec4f(finalColor, finalAlpha);
+  let finalColor = select(input.color.rgb, auraColor, input.aura > .5);
+  return vec4f(finalColor, alpha);
 }
 
 @vertex
@@ -363,22 +377,27 @@ fn atomFragment(input: VertexOutput) -> @location(0) vec4f {
 }
 `;
 
-export const PICK_SHADER = /* wgsl */ `
+// Separate module so its binding declarations don't pollute RENDER_SHADER's auto-layout
+export const BH_RENDER_SHADER = /* wgsl */ `
 struct Params {
   count: u32, phase: u32, gridSide: u32, _pad0: u32,
   dt: f32, age: f32, gravity: f32, explosion: f32,
   entropy: f32, lifetime: f32, spectrum: f32, domain: f32,
   viewport: vec2f, zoom: f32, yaw: f32,
   pitch: f32, approach: f32, pan: vec2f,
-  focusId: u32, spin: f32, _pad2: vec2f,
+  spin: f32, _pad2: f32, _pad3: vec2f,
 }
-struct Particle { position: vec4f, velocity: vec4f }
-struct Pick { point: vec2f, radius: f32, _pad: f32 }
+struct BlackHoles {
+  count: u32, _p0: u32, _p1: u32, _p2: u32,
+  holes: array<vec4f, 8>,
+}
 @group(0) @binding(0) var<uniform> params: Params;
-@group(0) @binding(1) var<storage, read> particles: array<Particle>;
-@group(0) @binding(2) var<storage, read> accelerations: array<vec4f>;
-@group(0) @binding(3) var<uniform> pick: Pick;
-@group(0) @binding(4) var<storage, read_write> result: atomic<u32>;
+@group(0) @binding(1) var<uniform> bh: BlackHoles;
+
+struct BHOutput {
+  @builtin(position) position: vec4f,
+  @location(0) uv: vec2f,
+}
 
 fn rotate(point: vec3f) -> vec3f {
   let cy = cos(params.yaw); let sy = sin(params.yaw);
@@ -388,20 +407,51 @@ fn rotate(point: vec3f) -> vec3f {
   return vec3f(x, cp * point.y - sp * z, sp * point.y + cp * z);
 }
 
-@compute @workgroup_size(256)
-fn pickNearest(@builtin(global_invocation_id) gid: vec3u) {
-  let i = gid.x;
-  if (i >= params.count || abs(accelerations[i].w) <= 0.0) { return; }
-  var focus = vec3f(0.0);
-  if (params.focusId < params.count) { focus = particles[params.focusId].position.xyz; }
-  let view = rotate(particles[i].position.xyz - focus);
+@vertex
+fn bhVertex(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> BHOutput {
+  let corners = array<vec2f, 6>(vec2f(-1,-1), vec2f(1,-1), vec2f(-1,1), vec2f(-1,1), vec2f(1,-1), vec2f(1,1));
+  var out: BHOutput;
+  out.position = vec4f(2.0, 2.0, 0.0, 1.0);
+  out.uv = vec2f(0.0);
+  if (ii >= bh.count) { return out; }
+  let hole = bh.holes[ii];
+  let view = rotate(hole.xyz);
   let focal = max(params.viewport.x, params.viewport.y) * 1.15;
   let perspective = focal / max(20.0, focal + view.z * params.zoom) * params.zoom;
-  let screen = params.viewport * .5 + params.pan + view.xy * perspective;
-  let distance = length(screen - pick.point);
-  if (distance <= pick.radius) {
-    let quantized = min(2047u, u32(distance * 16.0));
-    atomicMin(&result, (quantized << 21u) | i);
-  }
+  let center = params.viewport * 0.5 + params.pan + view.xy * perspective;
+  // World-space radius projected into screen pixels — BH scales with zoom like a real 3D object
+  let worldRadius = 5.0 + hole.w * 2.0;
+  let pixelRadius = max(6.0, worldRadius * perspective);
+  let screen = center + corners[vi] * pixelRadius;
+  out.position = vec4f(screen.x / params.viewport.x * 2.0 - 1.0, 1.0 - screen.y / params.viewport.y * 2.0, 0.0, 1.0);
+  out.uv = corners[vi];
+  return out;
+}
+
+// Pass 1: semi-transparent shadow inside the accretion ring only.
+// Drawn with standard alpha blend so particles behind are dimmed but visible.
+@fragment
+fn bhDiscFragment(input: BHOutput) -> @location(0) vec4f {
+  let r = length(input.uv);
+  // Fade out right at the inner edge of the ring (ring center=0.62, inner edge≈0.44)
+  let alpha = smoothstep(0.5, 0.34, r) * 0.6;
+  if (alpha < 0.01) { discard; }
+  return vec4f(0.0, 0.0, 0.0, alpha);
+}
+
+// Pass 2: additive glowing ring on top of the black disc.
+@fragment
+fn bhFragment(input: BHOutput) -> @location(0) vec4f {
+  let r = length(input.uv);
+  if (r > 1.0) { discard; }
+  // Accretion ring: bright orange-white band around event horizon
+  let ringDist = abs(r - 0.62);
+  let ring = max(0.0, 1.0 - ringDist / 0.18);
+  let ringColor = mix(vec3f(1.0, 0.45, 0.08), vec3f(1.0, 0.92, 0.65), ring * ring);
+  // Outer gravitational haze
+  let haze = smoothstep(1.0, 0.72, r) * 0.18;
+  let alpha = ring * 0.92 + haze * (1.0 - ring * 0.7);
+  if (alpha < 0.005) { discard; }
+  return vec4f(ringColor * ring + vec3f(0.55, 0.18, 0.0) * haze, alpha);
 }
 `;

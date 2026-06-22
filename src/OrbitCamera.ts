@@ -55,6 +55,20 @@ export class OrbitCamera {
     if (this.autoRotate && !this.dragging) this.yaw += dt * 0.083;
   }
 
+  unproject(canvasX: number, canvasY: number): [number, number, number] {
+    const cosYaw = Math.cos(this.yaw), sinYaw = Math.sin(this.yaw);
+    const cosPitch = Math.cos(this.pitch), sinPitch = Math.sin(this.pitch);
+    const rx = (canvasX - this.canvas.width / 2 - this.panX) / this.zoom;
+    const ry = (canvasY - this.canvas.height / 2 - this.panY) / this.zoom;
+    // Inverse of the yaw+pitch rotation at camera-depth=0
+    const rz = -ry * sinPitch;
+    return [
+      cosYaw * rx + sinYaw * rz,
+      cosPitch * ry,
+      -sinYaw * rx + cosYaw * rz,
+    ];
+  }
+
   prepare(): void {
     this.cosYaw = Math.cos(this.yaw); this.sinYaw = Math.sin(this.yaw);
     this.cosPitch = Math.cos(this.pitch); this.sinPitch = Math.sin(this.pitch);

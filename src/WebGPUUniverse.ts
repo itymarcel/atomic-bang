@@ -1,8 +1,10 @@
 import type { SimulationConfig } from "./config.js";
 import { OrbitCamera } from "./OrbitCamera.js";
-import { GPU_SHADER, GRID_SHADER, POISSON_SHADER, POST_SHADER, RENDER_SHADER, PICK_SHADER } from "./gpuShaders.js";
+import { GPU_SHADER, GRID_SHADER, POISSON_SHADER, POST_SHADER, RENDER_SHADER, BH_RENDER_SHADER } from "./gpuShaders.js";
 
 type Phase = "ready" | "approach" | "running";
+
+interface BlackHole { x: number; y: number; z: number; mass: number; vx: number; vy: number; vz: number; }
 
 export class WebGPUUniverse {
   static readonly MAX_PARTICLES = 2_000_000;
@@ -11,6 +13,8 @@ export class WebGPUUniverse {
   private static readonly PARTICLE_BYTES = 32;
   private static readonly ACCELERATION_BYTES = 16;
   private static readonly UNIFORM_BYTES = 96;
+  private static readonly BH_BUFFER_BYTES = 144; // 16 header + 8 * 16 holes
+  private static readonly BH_ACCUM_BYTES = 32;   // 8 × u32 absorption counters
 
   readonly camera: OrbitCamera;
   phase: Phase = "ready";
@@ -21,6 +25,8 @@ export class WebGPUUniverse {
   private config: SimulationConfig;
   private count = 0;
   private needsInitialization = false;
+  private blackHoles: BlackHole[] = [];
+  private bhAbsorptionInFlight = false;
 
   private constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -31,16 +37,6 @@ export class WebGPUUniverse {
   ) {
     this.config = config;
     this.camera = new OrbitCamera(canvas);
-    canvas.addEventListener("dblclick", event => this.requestPick(event.clientX, event.clientY));
-    canvas.addEventListener("pointerup", event => {
-      if (event.pointerType !== "touch") return;
-      const now = performance.now();
-      if (now - this.lastTapTime < 320 && Math.hypot(event.clientX - this.lastTapX, event.clientY - this.lastTapY) < 24) {
-        this.requestPick(event.clientX, event.clientY); this.lastTapTime = 0;
-      } else {
-        this.lastTapTime = now; this.lastTapX = event.clientX; this.lastTapY = event.clientY;
-      }
-    });
   }
 
   private paramsBuffer!: GPUBuffer;
@@ -49,6 +45,9 @@ export class WebGPUUniverse {
   private massBuffer!: GPUBuffer;
   private potentialA!: GPUBuffer;
   private potentialB!: GPUBuffer;
+  private bhBuffer!: GPUBuffer;
+  private bhAccumBuffer!: GPUBuffer;
+  private bhAccumReadback!: GPUBuffer;
   private initializePipeline!: GPUComputePipeline;
   private prePipeline!: GPUComputePipeline;
   private clearPipeline!: GPUComputePipeline;
@@ -57,7 +56,8 @@ export class WebGPUUniverse {
   private postPipeline!: GPUComputePipeline;
   private particlePipeline!: GPURenderPipeline;
   private atomPipeline!: GPURenderPipeline;
-  private pickPipeline!: GPUComputePipeline;
+  private bhDiscPipeline!: GPURenderPipeline;
+  private bhPipeline!: GPURenderPipeline;
   private initializeGroup!: GPUBindGroup;
   private preGroup!: GPUBindGroup;
   private clearGroup!: GPUBindGroup;
@@ -67,16 +67,8 @@ export class WebGPUUniverse {
   private postGroup!: GPUBindGroup;
   private particleRenderGroup!: GPUBindGroup;
   private atomRenderGroup!: GPUBindGroup;
-  private pickGroup!: GPUBindGroup;
-  private pickParams!: GPUBuffer;
-  private pickResult!: GPUBuffer;
-  private pickReadback!: GPUBuffer;
-  private pendingPick: [number, number] | null = null;
-  private pickInFlight = false;
-  private focusId = 0xffffffff;
-  private lastTapTime = 0;
-  private lastTapX = 0;
-  private lastTapY = 0;
+  private bhDiscRenderGroup!: GPUBindGroup;
+  private bhRenderGroup!: GPUBindGroup;
 
   static async create(canvas: HTMLCanvasElement, config: SimulationConfig): Promise<WebGPUUniverse> {
     const gpu = navigator.gpu;
@@ -109,10 +101,15 @@ export class WebGPUUniverse {
     this.physicsAccumulator = 0;
     this.count = 0;
     this.needsInitialization = false;
-    this.focusId = 0xffffffff;
+    this.blackHoles = [];
   }
 
   togglePause(): void { this.paused = !this.paused; }
+
+  placeBlackHole(x: number, y: number, z: number, mass: number): void {
+    if (this.blackHoles.length >= 8) this.blackHoles.shift();
+    this.blackHoles.push({ x, y, z, mass, vx: 0, vy: 0, vz: 0 });
+  }
 
   resize(): void {
     const dpr = Math.min(devicePixelRatio, 1.5);
@@ -149,6 +146,9 @@ export class WebGPUUniverse {
     }
 
     this.writeParams(1 / 60);
+    this.writeBhBuffer();
+    // Reset absorption counters before physics runs this frame
+    this.device.queue.writeBuffer(this.bhAccumBuffer, 0, new Uint32Array(8));
     if (this.needsInitialization) {
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.initializePipeline);
@@ -159,10 +159,11 @@ export class WebGPUUniverse {
       steps = Math.max(1, steps);
     }
     for (let i = 0; i < steps && this.phase === "running"; i++) this.encodePhysics(encoder);
-    const picking = this.encodePick(encoder);
     this.encodeRender(encoder);
+    const absorb = this.copyBhAbsorption(encoder);
     this.device.queue.submit([encoder.finish()]);
-    if (picking) void this.resolvePick();
+    if (absorb) void this.resolveBhAbsorption();
+    if (steps > 0) this.updateBlackHolePhysics(steps);
   }
 
   private initializeResources(): void {
@@ -173,25 +174,25 @@ export class WebGPUUniverse {
     this.massBuffer = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 4, usage });
     this.potentialA = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 4, usage });
     this.potentialB = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 4, usage });
-    this.pickParams = this.device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.pickResult = this.device.createBuffer({ size: 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
-    this.pickReadback = this.device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    this.bhBuffer = this.device.createBuffer({ size: WebGPUUniverse.BH_BUFFER_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.bhAccumBuffer = this.device.createBuffer({ size: WebGPUUniverse.BH_ACCUM_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.bhAccumReadback = this.device.createBuffer({ size: WebGPUUniverse.BH_ACCUM_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
 
     const particleModule = this.device.createShaderModule({ code: GPU_SHADER });
     const gridModule = this.device.createShaderModule({ code: GRID_SHADER });
     const poissonModule = this.device.createShaderModule({ code: POISSON_SHADER });
     const postModule = this.device.createShaderModule({ code: POST_SHADER });
     const renderModule = this.device.createShaderModule({ code: RENDER_SHADER });
-    const pickModule = this.device.createShaderModule({ code: PICK_SHADER });
+    const bhModule = this.device.createShaderModule({ code: BH_RENDER_SHADER });
     this.initializePipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: particleModule, entryPoint: "initialize" } });
     this.prePipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: particleModule, entryPoint: "preIntegrate" } });
     this.clearPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: gridModule, entryPoint: "clearMass" } });
     this.depositPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: gridModule, entryPoint: "deposit" } });
     this.jacobiPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: poissonModule, entryPoint: "jacobi" } });
     this.postPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: postModule, entryPoint: "postIntegrate" } });
-    this.pickPipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: pickModule, entryPoint: "pickNearest" } });
 
     const blend = { color: { srcFactor: "src-alpha", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one", operation: "add" } };
+    const blendOver = { color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } };
     this.particlePipeline = this.device.createRenderPipeline({
       layout: "auto", vertex: { module: renderModule, entryPoint: "particleVertex" },
       fragment: { module: renderModule, entryPoint: "particleFragment", targets: [{ format: this.format, blend }] },
@@ -200,6 +201,16 @@ export class WebGPUUniverse {
     this.atomPipeline = this.device.createRenderPipeline({
       layout: "auto", vertex: { module: renderModule, entryPoint: "atomVertex" },
       fragment: { module: renderModule, entryPoint: "atomFragment", targets: [{ format: this.format, blend }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.bhDiscPipeline = this.device.createRenderPipeline({
+      layout: "auto", vertex: { module: bhModule, entryPoint: "bhVertex" },
+      fragment: { module: bhModule, entryPoint: "bhDiscFragment", targets: [{ format: this.format, blend: blendOver }] },
+      primitive: { topology: "triangle-list" },
+    });
+    this.bhPipeline = this.device.createRenderPipeline({
+      layout: "auto", vertex: { module: bhModule, entryPoint: "bhVertex" },
+      fragment: { module: bhModule, entryPoint: "bhFragment", targets: [{ format: this.format, blend }] },
       primitive: { topology: "triangle-list" },
     });
 
@@ -219,7 +230,9 @@ export class WebGPUUniverse {
     this.jacobiAB = this.makeJacobiGroup(this.potentialA, this.potentialB);
     this.jacobiBA = this.makeJacobiGroup(this.potentialB, this.potentialA);
     this.postGroup = this.device.createBindGroup({ layout: this.postPipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: params }, { binding: 1, resource: particles }, { binding: 2, resource: accelerations }, { binding: 3, resource: { buffer: this.potentialA } },
+      { binding: 0, resource: params }, { binding: 1, resource: particles }, { binding: 2, resource: accelerations },
+      { binding: 3, resource: { buffer: this.potentialA } }, { binding: 4, resource: { buffer: this.bhBuffer } },
+      { binding: 5, resource: { buffer: this.bhAccumBuffer } },
     ] });
     this.particleRenderGroup = this.device.createBindGroup({ layout: this.particlePipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: params }, { binding: 1, resource: particles }, { binding: 2, resource: accelerations },
@@ -227,10 +240,11 @@ export class WebGPUUniverse {
     this.atomRenderGroup = this.device.createBindGroup({ layout: this.atomPipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: params },
     ] });
-    this.pickGroup = this.device.createBindGroup({ layout: this.pickPipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: params }, { binding: 1, resource: particles }, { binding: 2, resource: accelerations },
-      { binding: 3, resource: { buffer: this.pickParams } }, { binding: 4, resource: { buffer: this.pickResult } },
-    ] });
+    const bhEntries = [
+      { binding: 0, resource: params }, { binding: 1, resource: { buffer: this.bhBuffer } },
+    ];
+    this.bhDiscRenderGroup = this.device.createBindGroup({ layout: this.bhDiscPipeline.getBindGroupLayout(0), entries: bhEntries });
+    this.bhRenderGroup = this.device.createBindGroup({ layout: this.bhPipeline.getBindGroupLayout(0), entries: bhEntries });
   }
 
   private makeJacobiGroup(input: GPUBuffer, output: GPUBuffer): GPUBindGroup {
@@ -250,7 +264,7 @@ export class WebGPUUniverse {
     pass.setPipeline(this.clearPipeline); pass.setBindGroup(0, this.clearGroup); pass.dispatchWorkgroups(gridGroups);
     pass.setPipeline(this.depositPipeline); pass.setBindGroup(0, this.depositGroup); pass.dispatchWorkgroups(particleGroups);
     pass.setPipeline(this.jacobiPipeline);
-    for (let iteration = 0; iteration < 32; iteration++) {
+    for (let iteration = 0; iteration < 64; iteration++) {
       pass.setBindGroup(0, iteration % 2 === 0 ? this.jacobiAB : this.jacobiBA);
       pass.dispatchWorkgroups(gridGroups);
     }
@@ -265,51 +279,102 @@ export class WebGPUUniverse {
     if (this.phase === "approach") {
       pass.setPipeline(this.atomPipeline); pass.setBindGroup(0, this.atomRenderGroup); pass.draw(6, 2);
     } else if (this.phase === "running" && this.count > 0) {
-      // Physics always evolves the complete population. Rendering more than
-      // this produces little additional visible density but substantial vertex
-      // and blending pressure on integrated GPUs.
       pass.setPipeline(this.particlePipeline); pass.setBindGroup(0, this.particleRenderGroup); pass.draw(6, Math.min(this.count, 350000));
+    }
+    if (this.blackHoles.length > 0) {
+      // Draw opaque black disc first to occlude particles behind the BH
+      pass.setPipeline(this.bhDiscPipeline); pass.setBindGroup(0, this.bhDiscRenderGroup); pass.draw(6, this.blackHoles.length);
+      // Then additive glowing ring on top
+      pass.setPipeline(this.bhPipeline); pass.setBindGroup(0, this.bhRenderGroup); pass.draw(6, this.blackHoles.length);
     }
     pass.end();
   }
 
-  private requestPick(clientX: number, clientY: number): void {
-    if (this.phase !== "running") return;
-    const rect = this.canvas.getBoundingClientRect();
-    this.pendingPick = [
-      (clientX - rect.left) * this.canvas.width / rect.width,
-      (clientY - rect.top) * this.canvas.height / rect.height,
-    ];
+  private updateBlackHolePhysics(steps: number): void {
+    if (this.blackHoles.length === 0) return;
+    const dt = 1 / 60;
+    const domain = Math.max(8, 8 + this.age * this.config.impactSpeed * 1.12);
+    const bhG = domain * domain * 0.002;
+    const bhSoft2 = Math.max(36, domain * domain * 0.0009);
+
+    for (let s = 0; s < steps; s++) {
+      // Merge BHs that overlap (momentum-conserving)
+      for (let i = 0; i < this.blackHoles.length - 1; i++) {
+        for (let j = i + 1; j < this.blackHoles.length; j++) {
+          const bi = this.blackHoles[i], bj = this.blackHoles[j];
+          const dx = bj.x - bi.x, dy = bj.y - bi.y, dz = bj.z - bi.z;
+          const mergeR = Math.max(2, bi.mass * 0.4) + Math.max(2, bj.mass * 0.4);
+          if (dx*dx + dy*dy + dz*dz < mergeR * mergeR) {
+            const m = bi.mass + bj.mass;
+            bi.x = (bi.x*bi.mass + bj.x*bj.mass) / m;
+            bi.y = (bi.y*bi.mass + bj.y*bj.mass) / m;
+            bi.z = (bi.z*bi.mass + bj.z*bj.mass) / m;
+            bi.vx = (bi.vx*bi.mass + bj.vx*bj.mass) / m;
+            bi.vy = (bi.vy*bi.mass + bj.vy*bj.mass) / m;
+            bi.vz = (bi.vz*bi.mass + bj.vz*bj.mass) / m;
+            bi.mass = m;
+            this.blackHoles.splice(j, 1);
+            break;
+          }
+        }
+      }
+
+      // Mutual BH-BH gravity (symplectic Euler)
+      for (let i = 0; i < this.blackHoles.length; i++) {
+        let ax = 0, ay = 0, az = 0;
+        for (let j = 0; j < this.blackHoles.length; j++) {
+          if (i === j) continue;
+          const bi = this.blackHoles[i], bj = this.blackHoles[j];
+          const dx = bj.x - bi.x, dy = bj.y - bi.y, dz = bj.z - bi.z;
+          const dist2 = Math.max(dx*dx + dy*dy + dz*dz, bhSoft2);
+          const dist = Math.sqrt(dist2);
+          const f = bj.mass * bhG / dist2;
+          ax += (dx / dist) * f;
+          ay += (dy / dist) * f;
+          az += (dz / dist) * f;
+        }
+        const bh = this.blackHoles[i];
+        bh.vx += ax * dt; bh.vy += ay * dt; bh.vz += az * dt;
+      }
+      for (const bh of this.blackHoles) {
+        bh.x += bh.vx * dt; bh.y += bh.vy * dt; bh.z += bh.vz * dt;
+      }
+    }
   }
 
-  private encodePick(encoder: GPUCommandEncoder): boolean {
-    if (!this.pendingPick || this.pickInFlight || this.count === 0) return false;
-    const data = new Float32Array([this.pendingPick[0], this.pendingPick[1], 64 * Math.min(devicePixelRatio, 1.5), 0]);
-    this.device.queue.writeBuffer(this.pickParams, 0, data);
-    this.device.queue.writeBuffer(this.pickResult, 0, new Uint32Array([0xffffffff]));
-    const pass = encoder.beginComputePass();
-    pass.setPipeline(this.pickPipeline); pass.setBindGroup(0, this.pickGroup);
-    pass.dispatchWorkgroups(Math.ceil(this.count / 256)); pass.end();
-    encoder.copyBufferToBuffer(this.pickResult, 0, this.pickReadback, 0, 4);
-    this.pendingPick = null;
-    this.pickInFlight = true;
+  private copyBhAbsorption(encoder: GPUCommandEncoder): boolean {
+    if (this.bhAbsorptionInFlight || this.blackHoles.length === 0 || this.phase !== "running") return false;
+    encoder.copyBufferToBuffer(this.bhAccumBuffer, 0, this.bhAccumReadback, 0, WebGPUUniverse.BH_ACCUM_BYTES);
+    this.bhAbsorptionInFlight = true;
     return true;
   }
 
-  private async resolvePick(): Promise<void> {
+  private async resolveBhAbsorption(): Promise<void> {
     try {
-      await this.pickReadback.mapAsync(GPUMapMode.READ);
-      const packed = new Uint32Array(this.pickReadback.getMappedRange())[0];
-      if (packed !== 0xffffffff) {
-        this.focusId = packed & 0x1fffff;
-        this.camera.panX = 0; this.camera.panY = 0;
-      } else {
-        this.focusId = 0xffffffff;
+      await this.bhAccumReadback.mapAsync(GPUMapMode.READ);
+      const counts = new Uint32Array(this.bhAccumReadback.getMappedRange());
+      for (let k = 0; k < this.blackHoles.length; k++) {
+        this.blackHoles[k].mass += counts[k] * 0.001;
       }
-      this.pickReadback.unmap();
+      this.bhAccumReadback.unmap();
     } finally {
-      this.pickInFlight = false;
+      this.bhAbsorptionInFlight = false;
     }
+  }
+
+  private writeBhBuffer(): void {
+    const data = new ArrayBuffer(WebGPUUniverse.BH_BUFFER_BYTES);
+    const view = new DataView(data);
+    view.setUint32(0, this.blackHoles.length, true);
+    for (let i = 0; i < this.blackHoles.length; i++) {
+      const bh = this.blackHoles[i];
+      const off = 16 + i * 16;
+      view.setFloat32(off, bh.x, true);
+      view.setFloat32(off + 4, bh.y, true);
+      view.setFloat32(off + 8, bh.z, true);
+      view.setFloat32(off + 12, bh.mass, true);
+    }
+    this.device.queue.writeBuffer(this.bhBuffer, 0, data);
   }
 
   private writeParams(dt: number): void {
@@ -325,16 +390,13 @@ export class WebGPUUniverse {
     view.setFloat32(32, this.config.randomness / 100, true);
     view.setFloat32(36, this.config.lifetime, true);
     view.setFloat32(40, this.config.sizeVariation / 100, true);
-    // Domain tracks fastest particles (1.12× impactSpeed) so the mesh stays
-    // tight without letting edge particles escape periodic boundaries.
     view.setFloat32(44, Math.max(8, 8 + this.age * this.config.impactSpeed * 1.12), true);
     view.setFloat32(48, this.canvas.width, true); view.setFloat32(52, this.canvas.height, true);
     view.setFloat32(56, this.camera.zoom, true); view.setFloat32(60, this.camera.yaw, true);
     view.setFloat32(64, this.camera.pitch, true);
     view.setFloat32(68, Math.min(1, this.approachTime / 1.45), true);
     view.setFloat32(72, this.camera.panX, true); view.setFloat32(76, this.camera.panY, true);
-    view.setUint32(80, this.focusId, true);
-    view.setFloat32(84, this.config.angularMomentum / 100, true);
+    view.setFloat32(80, this.config.angularMomentum / 100, true);
     this.device.queue.writeBuffer(this.paramsBuffer, 0, buffer);
   }
 }

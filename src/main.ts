@@ -22,6 +22,7 @@ function writeURL(config: typeof DEFAULT_CONFIG): void {
 }
 
 const canvas = document.querySelector<HTMLCanvasElement>("#universe")!;
+const bhRing = document.querySelector<HTMLDivElement>("#bh-ring")!;
 const config = readURL();
 
 let universe: WebGPUUniverse;
@@ -59,12 +60,80 @@ addEventListener("keydown", event => {
   }
 });
 
+// Black hole placement: click-and-hold on canvas
+// Hold duration → mass (50ms = tiny, 2000ms = max).
+// Movement > 8px cancels placement (it's a camera drag instead).
+let bhDown = false;
+let bhDownTime = 0;
+let bhStartX = 0;
+let bhStartY = 0;
+let bhMoved = false;
+
+canvas.addEventListener("pointerdown", event => {
+  bhDown = true;
+  bhDownTime = event.timeStamp;
+  bhStartX = event.clientX;
+  bhStartY = event.clientY;
+  bhMoved = false;
+  bhRing.style.left = `${event.clientX}px`;
+  bhRing.style.top = `${event.clientY}px`;
+});
+
+canvas.addEventListener("pointermove", event => {
+  if (!bhDown) return;
+  if (Math.hypot(event.clientX - bhStartX, event.clientY - bhStartY) > 8) {
+    bhMoved = true;
+    bhRing.style.display = "none";
+  }
+});
+
+canvas.addEventListener("pointerup", event => {
+  if (!bhDown) return;
+  bhDown = false;
+  bhRing.style.display = "none";
+
+  if (!bhMoved && universe.phase === "running") {
+    const duration = event.timeStamp - bhDownTime;
+    if (duration >= 80) {
+      const mass = duration / 100;
+      const rect = canvas.getBoundingClientRect();
+      const dpr = canvas.width / rect.width;
+      const canvasX = (event.clientX - rect.left) * dpr;
+      const canvasY = (event.clientY - rect.top) * dpr;
+      const [wx, wy, wz] = universe.camera.unproject(canvasX, canvasY);
+      universe.placeBlackHole(wx, wy, wz, mass);
+    }
+  }
+});
+
+canvas.addEventListener("pointercancel", () => {
+  bhDown = false;
+  bhRing.style.display = "none";
+});
+
 let previous = performance.now();
 function frame(now: number): void {
   const dt = Math.min((now - previous) / 1000, .033);
   previous = now;
   universe.frame(dt);
   ui.update(universe.paused);
+
+  // Animate BH sizing ring during hold
+  if (bhDown && !bhMoved) {
+    const duration = now - bhDownTime;
+    const mass = duration / 100;
+    // Mirror the GPU formula: worldRadius * zoom / dpr, scaled by 1.24 (= 2 * ringR=0.62)
+    // so the CSS ring border sits exactly on the accretion ring in the shader.
+    const worldRadius = 5 + mass * 2;
+    const dpr = Math.min(devicePixelRatio, 1.5);
+    const size = Math.max(20, 1.24 * worldRadius * universe.camera.zoom / dpr);
+    const opacity = 0.3 + Math.min(mass / 30, 1) * 0.7;
+    bhRing.style.width = `${size}px`;
+    bhRing.style.height = `${size}px`;
+    bhRing.style.opacity = String(opacity);
+    bhRing.style.display = "block";
+  }
+
   requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
