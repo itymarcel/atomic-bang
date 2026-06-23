@@ -16,8 +16,12 @@ button { border: 0; cursor: pointer; }
 .trigger:active { transform: translateY(1px); }
 .icon-button { width: 40px; background: transparent; color: #7c8490; border: 1px solid rgba(255,255,255,.1); }
 .icon-button.active { background: rgba(255,138,80,.14); color: #ff8a5f; border-color: rgba(255,138,80,.38); }
+.control.disabled { opacity: 0.35; pointer-events: none; }
 .stats { display: flex; gap: 16px; margin-top: 12px; font: 400 10px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; color: #4b5563; }
 .hint { margin: 8px 0 0; font: 500 11px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .06em; color: #ff8a5f; }
+#preset-select { width: 100%; appearance: none; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); border-radius: 2px; color: #6b7280; padding: 7px 10px; font: 400 10px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; cursor: pointer; margin-bottom: 2px; }
+#preset-select:focus { outline: none; border-color: rgba(255,138,80,.45); }
+#preset-select option { background: #0e1117; color: #c0c6cf; }
 #bh-ring { position: fixed; pointer-events: none; border: 2px solid rgba(255,140,50,0.85); border-radius: 50%; box-shadow: 0 0 10px rgba(255,120,30,0.5), inset 0 0 6px rgba(0,0,0,0.6); transform: translate(-50%,-50%); display: none; z-index: 10; transition: width 0.05s, height 0.05s; }
 @media (max-height: 760px) { .panel { top: 10px; transform: scale(.88); transform-origin: top left; } }
 @media (max-width: 650px) { .panel { left: 14px; right: 14px; width: auto; top: 14px; } }

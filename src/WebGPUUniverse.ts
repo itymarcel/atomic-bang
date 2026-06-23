@@ -20,6 +20,7 @@ export class WebGPUUniverse {
   phase: Phase = "ready";
   paused = false;
   age = 0;
+  collisionEnabled = false;
   private approachTime = 0;
   private physicsAccumulator = 0;
   private config: SimulationConfig;
@@ -46,6 +47,7 @@ export class WebGPUUniverse {
   private potentialA!: GPUBuffer;
   private potentialB!: GPUBuffer;
   private gradientBuffer!: GPUBuffer;
+  private momentumBuffer!: GPUBuffer;
   private bhBuffer!: GPUBuffer;
   private bhRenderBuffer!: GPUBuffer;
   private bhAccumBuffer!: GPUBuffer;
@@ -183,6 +185,7 @@ export class WebGPUUniverse {
     this.particleBuffer = this.device.createBuffer({ size: WebGPUUniverse.MAX_PARTICLES * WebGPUUniverse.PARTICLE_BYTES, usage });
     this.accelerationBuffer = this.device.createBuffer({ size: WebGPUUniverse.MAX_PARTICLES * WebGPUUniverse.ACCELERATION_BYTES, usage });
     this.massBuffer = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 4, usage });
+    this.momentumBuffer = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 12, usage });
     this.potentialA = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 4, usage });
     this.potentialB = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 4, usage });
     this.gradientBuffer = this.device.createBuffer({ size: WebGPUUniverse.GRID_CELLS * 16, usage });
@@ -237,9 +240,11 @@ export class WebGPUUniverse {
     ] });
     this.clearGroup = this.device.createBindGroup({ layout: this.clearPipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: params }, { binding: 3, resource: { buffer: this.massBuffer } },
+      { binding: 4, resource: { buffer: this.momentumBuffer } },
     ] });
     this.depositGroup = this.device.createBindGroup({ layout: this.depositPipeline.getBindGroupLayout(0), entries: [
-      { binding: 0, resource: params }, { binding: 1, resource: particles }, { binding: 2, resource: accelerations }, { binding: 3, resource: { buffer: this.massBuffer } },
+      { binding: 0, resource: params }, { binding: 1, resource: particles }, { binding: 2, resource: accelerations },
+      { binding: 3, resource: { buffer: this.massBuffer } }, { binding: 4, resource: { buffer: this.momentumBuffer } },
     ] });
     this.jacobiAB = this.makeJacobiGroup(this.potentialA, this.potentialB);
     this.jacobiBA = this.makeJacobiGroup(this.potentialB, this.potentialA);
@@ -251,6 +256,7 @@ export class WebGPUUniverse {
       { binding: 0, resource: params }, { binding: 1, resource: particles }, { binding: 2, resource: accelerations },
       { binding: 3, resource: { buffer: this.gradientBuffer } }, { binding: 4, resource: { buffer: this.bhBuffer } },
       { binding: 5, resource: { buffer: this.bhAccumBuffer } },
+      { binding: 6, resource: { buffer: this.massBuffer } }, { binding: 7, resource: { buffer: this.momentumBuffer } },
     ] });
     this.particleRenderGroup = this.device.createBindGroup({ layout: this.particlePipeline.getBindGroupLayout(0), entries: [
       { binding: 0, resource: params }, { binding: 1, resource: particles }, { binding: 2, resource: accelerations },
@@ -449,6 +455,7 @@ export class WebGPUUniverse {
     view.setFloat32(68, Math.min(1, this.approachTime / 1.45), true);
     view.setFloat32(72, this.camera.panX, true); view.setFloat32(76, this.camera.panY, true);
     view.setFloat32(80, this.config.angularMomentum / 100, true);
+    view.setFloat32(84, this.collisionEnabled ? this.config.collisionStrength / 100 : 0, true);
     this.device.queue.writeBuffer(this.paramsBuffer, 0, buffer);
   }
 }

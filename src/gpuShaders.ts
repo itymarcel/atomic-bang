@@ -19,7 +19,7 @@ struct Params {
   approach: f32,
   pan: vec2f,
   spin: f32,
-  _pad2: f32,
+  collision: f32,
   _pad3: vec2f,
 }
 
@@ -105,14 +105,18 @@ struct Particle { position: vec4f, velocity: vec4f }
 @group(0) @binding(1) var<storage, read> particles: array<Particle>;
 @group(0) @binding(2) var<storage, read> accelerations: array<vec4f>;
 @group(0) @binding(3) var<storage, read_write> mass: array<atomic<u32>>;
+@group(0) @binding(4) var<storage, read_write> mom: array<atomic<i32>>; // 3 × i32 per cell: px, py, pz
 
 fn index3(p: vec3u) -> u32 { return p.x + p.y * params.gridSide + p.z * params.gridSide * params.gridSide; }
-
 
 @compute @workgroup_size(256)
 fn clearMass(@builtin(global_invocation_id) gid: vec3u) {
   let cells = params.gridSide * params.gridSide * params.gridSide;
-  if (gid.x < cells) { atomicStore(&mass[gid.x], 0u); }
+  if (gid.x >= cells) { return; }
+  atomicStore(&mass[gid.x], 0u);
+  atomicStore(&mom[gid.x * 3u + 0u], 0);
+  atomicStore(&mom[gid.x * 3u + 1u], 0);
+  atomicStore(&mom[gid.x * 3u + 2u], 0);
 }
 
 @compute @workgroup_size(256)
@@ -123,15 +127,21 @@ fn deposit(@builtin(global_invocation_id) gid: vec3u) {
   let grid = clamp((particles[i].position.xyz / params.domain + 0.5) * sideMax, vec3f(0.0), vec3f(sideMax));
   let base = vec3u(floor(grid));
   let fraction = fract(grid);
+  let starMass = max(0.4, pow(particles[i].position.w, 1.6)); // bigger = heavier, superlinear cheat
+  let vel = particles[i].velocity.xyz;
   for (var z = 0u; z <= 1u; z++) {
     for (var y = 0u; y <= 1u; y++) {
       for (var x = 0u; x <= 1u; x++) {
         let offset = vec3u(x, y, z);
         let cell = min(base + offset, vec3u(params.gridSide - 1u));
         let weight3 = select(vec3f(1.0) - fraction, fraction, offset == vec3u(1u));
-        let starMass = max(0.4, pow(particles[i].position.w, 1.6)); // bigger = heavier, superlinear cheat
-        let fixedWeight = u32(max(0.0, weight3.x * weight3.y * weight3.z * starMass * 256.0));
-        atomicAdd(&mass[index3(cell)], fixedWeight);
+        let w = weight3.x * weight3.y * weight3.z * starMass;
+        let ci = index3(cell);
+        atomicAdd(&mass[ci], u32(max(0.0, w * 256.0)));
+        // Deposit mass-weighted momentum as fixed-point (scale 256)
+        atomicAdd(&mom[ci * 3u + 0u], i32(w * vel.x * 256.0));
+        atomicAdd(&mom[ci * 3u + 1u], i32(w * vel.y * 256.0));
+        atomicAdd(&mom[ci * 3u + 2u], i32(w * vel.z * 256.0));
       }
     }
   }
@@ -278,7 +288,7 @@ struct Params {
   entropy: f32, lifetime: f32, spectrum: f32, domain: f32,
   viewport: vec2f, zoom: f32, yaw: f32,
   pitch: f32, approach: f32, pan: vec2f,
-  spin: f32, _pad2: f32, _pad3: vec2f,
+  spin: f32, collision: f32, _pad3: vec2f,
 }
 struct Particle { position: vec4f, velocity: vec4f }
 struct BlackHoles {
@@ -291,6 +301,8 @@ struct BlackHoles {
 @group(0) @binding(3) var<storage, read> gridGradients: array<vec4f>;
 @group(0) @binding(4) var<uniform> bh: BlackHoles;
 @group(0) @binding(5) var<storage, read_write> bhAccum: array<atomic<u32>, 8>;
+@group(0) @binding(6) var<storage, read_write> gridMass: array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read_write> gridMom: array<atomic<i32>>;
 
 fn index3(p: vec3u) -> u32 { return p.x + p.y * params.gridSide + p.z * params.gridSide * params.gridSide; }
 fn wrap(value: i32) -> u32 {
@@ -342,6 +354,37 @@ fn postIntegrate(@builtin(global_invocation_id) gid: vec3u) {
     let a2 = dot(acceleration, acceleration);
     if (a2 > 0.0001) {
       velocity -= acceleration * (dot(velocity, acceleration) / a2) * (1.0 - exp(-0.42 * params.dt));
+    }
+  }
+  // Grid-based collision: CIC-interpolate the local mean velocity from all 8 neighbour
+  // cells using the same weights used during deposit. Reading only the base cell causes
+  // sharp discontinuities at cell boundaries; interpolation gives a smooth field.
+  if (params.collision > 0.0) {
+    var interpMean = vec3f(0.0);
+    var totalW = 0.0;
+    for (var cz = 0u; cz <= 1u; cz++) {
+      for (var cy = 0u; cy <= 1u; cy++) {
+        for (var cx = 0u; cx <= 1u; cx++) {
+          let offset = vec3u(cx, cy, cz);
+          let cell = min(base + offset, vec3u(params.gridSide - 1u));
+          let weight3 = select(vec3f(1.0) - fraction, fraction, offset == vec3u(1u));
+          let w = weight3.x * weight3.y * weight3.z;
+          let ci = index3(cell);
+          let cm = f32(atomicLoad(&gridMass[ci])) / 256.0;
+          if (cm > 0.5) {
+            let mv = vec3f(
+              f32(atomicLoad(&gridMom[ci * 3u + 0u])),
+              f32(atomicLoad(&gridMom[ci * 3u + 1u])),
+              f32(atomicLoad(&gridMom[ci * 3u + 2u])),
+            ) / (cm * 256.0);
+            interpMean += mv * w;
+            totalW += w;
+          }
+        }
+      }
+    }
+    if (totalW > 0.0) {
+      velocity += (interpMean / totalW - velocity) * params.collision;
     }
   }
   particles[i].velocity = vec4f(velocity, 0.0);

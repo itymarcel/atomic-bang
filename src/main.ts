@@ -1,6 +1,7 @@
 import { DEFAULT_CONFIG, CONTROL_DEFINITIONS } from "./config.js";
 import { UI } from "./UI.js";
 import { WebGPUUniverse } from "./WebGPUUniverse.js";
+import { PRESETS } from "./presets.js";
 
 function readURL(): typeof DEFAULT_CONFIG {
   const params = new URLSearchParams(location.search);
@@ -45,6 +46,45 @@ const ui = new UI(config, next => {
 writeURL(config);
 
 const rotateBtn = document.querySelector<HTMLButtonElement>("#rotate")!;
+const collisionBtn = document.querySelector<HTMLButtonElement>("#collision")!;
+const collisionRow = document.querySelector<HTMLElement>('[data-key="collisionStrength"]')!;
+
+function setCollision(enabled: boolean): void {
+  universe.collisionEnabled = enabled;
+  collisionBtn.classList.toggle("active", enabled);
+  collisionRow.classList.toggle("disabled", !enabled);
+}
+
+// Populate preset dropdown
+const presetSelect = document.querySelector<HTMLSelectElement>("#preset-select")!;
+for (const preset of PRESETS) {
+  const opt = document.createElement("option");
+  opt.value = preset.value;
+  opt.textContent = preset.label;
+  presetSelect.append(opt);
+}
+
+presetSelect.addEventListener("change", () => {
+  const preset = PRESETS.find(p => p.value === presetSelect.value);
+  presetSelect.value = "";
+  if (!preset) return;
+
+  Object.assign(config, preset.config);
+  universe.setConfig(config);
+  ui.setValues(config);
+  writeURL(config);
+
+  setCollision(preset.collisionEnabled);
+  universe.trigger();
+
+  if (preset.blackHoles.length > 0) {
+    setTimeout(() => {
+      for (const bh of preset.blackHoles) {
+        universe.placeBlackHole(bh.x, bh.y, bh.z, bh.mass);
+      }
+    }, 5000);
+  }
+});
 
 addEventListener("resize", () => universe.resize());
 document.querySelector("#trigger")!.addEventListener("click", () => universe.trigger());
@@ -53,6 +93,8 @@ rotateBtn.addEventListener("click", () => {
   universe.camera.autoRotate = !universe.camera.autoRotate;
   rotateBtn.classList.toggle("active", universe.camera.autoRotate);
 });
+collisionBtn.addEventListener("click", () => setCollision(!universe.collisionEnabled));
+setCollision(false);
 addEventListener("keydown", event => {
   if (event.code === "Space" && event.target === document.body) {
     event.preventDefault();

@@ -23,10 +23,11 @@ WebGPU requires a secure context; `localhost` qualifies. Firefox Nightly and Chr
 
 ```text
 index.html              Minimal markup, panel structure, BH ring overlay
-src/main.ts             App lifecycle, event handlers, BH placement, frame loop
+src/main.ts             App lifecycle, event handlers, BH placement, preset wiring, frame loop
 src/config.ts           SimulationConfig types, defaults, and slider definitions
-src/UI.ts               Slider and button bindings
-src/style.css           Layout, floating panel, stats, hint, BH ring
+src/presets.ts          Preset definitions (config snapshots + BH spawn list)
+src/UI.ts               Slider and button bindings, setValues() for programmatic updates
+src/style.css           Layout, floating panel, stats, hint, BH ring, preset select
 src/OrbitCamera.ts      Orbit / pan / pinch-zoom / auto-rotate / unproject
 src/WebGPUUniverse.ts   GPU simulation engine, BH physics, render pipeline
 src/gpuShaders.ts       All WGSL shaders (compute + render + lens)
@@ -34,6 +35,11 @@ src/webgpu.d.ts         Minimal local WebGPU TypeScript type stubs
 ```
 
 ## Controls
+
+**Preset dropdown (top of panel):**
+- Selects a named configuration snapshot; immediately applies all sliders, collision state, triggers the universe, and schedules any BH spawns
+- Resets to `— preset —` after selection (one-shot action, not persistent state)
+- Dropdown label shows `[+Nbh]` when the preset includes automatic BH placement
 
 **Sliders (all persisted in URL query string):**
 - Particle count — 1,000 to 2,000,000
@@ -44,11 +50,13 @@ src/webgpu.d.ts         Minimal local WebGPU TypeScript type stubs
 - Entropy — initial velocity and density randomness
 - Angular momentum — coherent spin speed around a shared axis
 - Overall speed — simulation-time multiplier 0.1× to 4×
+- Collision energy loss — fraction of relative velocity dissipated per step (0.00–1.00); only active when collision is toggled on
 
 **Buttons:**
 - Start / retrigger — clears and restarts the universe
 - Pause (Ⅱ) — freezes simulation time
 - Auto-rotate (↻) — smooth camera orbit around current view position, at 1/3 normal orbit speed
+- Collision (⊗) — toggles grid-based momentum-conserving particle collision; the energy-loss slider is disabled (greyed) when off
 
 **Black hole placement:**
 - Click and hold on the canvas — a growing orange ring preview appears
@@ -73,6 +81,7 @@ src/webgpu.d.ts         Minimal local WebGPU TypeScript type stubs
 | accelerationBuffer | acceleration (xyz) + lifetime/gas flag (w) | 16 B × N |
 | paramsBuffer | uniform params struct | 96 B |
 | massBuffer | atomic u32 grid mass (32³) | 128 KB |
+| momentumBuffer | atomic i32 grid momentum, 3 components per cell (32³) | 384 KB |
 | potentialA/B | f32 Poisson potential ping-pong (32³) | 128 KB each |
 | gradientBuffer | precomputed potential gradient (xyz) per mesh cell | 512 KB |
 | bhBuffer | black hole physics state (count + 8 × vec4) | 144 B |
@@ -84,11 +93,24 @@ src/webgpu.d.ts         Minimal local WebGPU TypeScript type stubs
 ### Physics sequence (per fixed step, 1/60 s)
 
 1. **preIntegrate** — half velocity kick from previous acceleration
-2. **clearMass** — zero the 32³ mass grid
-3. **deposit** — cloud-in-cell mass deposition, weighted by `pow(radius, 1.6)` so visually larger particles contribute proportionally more gravitational mass
+2. **clearMass** — zero the 32³ mass grid and all 3 × 32³ momentum components atomically
+3. **deposit** — cloud-in-cell mass and momentum deposition; each particle distributes `w = cicWeight × starMass` to each of 8 neighbouring cells, accumulating `w` into `massBuffer` and `w × velocity` into `momentumBuffer` (fixed-point, ×256 scale for i32 atomics)
 4. **jacobiPair × 64** — 128 Jacobi relaxation iterations solving ∇²φ = density on the 32³ grid; each dispatch computes two iterations from a workgroup-local tile with a two-cell halo
 5. **calculateGradient** — computes the central-difference potential gradient once at each of the 32³ mesh cells
-6. **postIntegrate** — trilinearly interpolates the cached mesh gradients → particle acceleration; applies BH gravity (1/r² with softening); checks absorption radius per BH; kills absorbed particles via `accelerations[i].w = 0` and increments `bhAccumBuffer[k]`; second half velocity kick
+6. **postIntegrate** — trilinearly interpolates the cached mesh gradients → particle acceleration; applies BH gravity (1/r² with softening); checks absorption radius per BH; second half velocity kick; then if `params.collision > 0`, reads back the deposited mass and momentum from all 8 CIC-neighbour cells (same weights as deposit) to reconstruct a smooth interpolated mean velocity field, and blends the particle's velocity toward that mean by `params.collision` (the energy-loss fraction)
+
+### Collision physics
+
+Grid-based, momentum-conserving. At deposit time each particle writes mass-weighted momentum (`w × v`) to the same 8 cells it deposits mass into. At postIntegrate time, the particle reads back mass and momentum from all 8 neighbours using the same CIC weights, reconstructing a continuous interpolated mean-velocity field:
+
+```
+interpMean = Σ_k ( w_k × mom_k / mass_k )  /  Σ_k w_k
+velocity  += (interpMean - velocity) × params.collision
+```
+
+Reading all 8 cells (not just the nearest cell) is critical — nearest-cell lookup creates sharp discontinuities at grid boundaries and causes visible oscillation artefacts. The interpolated field is smooth and consistent with how gravity is read back from `gradientBuffer`.
+
+`params.collision = collisionStrength / 100`. Value 0 disables the block entirely. Value 1 is fully inelastic (all relative velocity dissipated in one step). Typical useful range: 0.02–0.15.
 
 ### Black hole physics (CPU, per frame)
 
@@ -154,7 +176,8 @@ The `Params` struct must stay byte-for-byte aligned with `writeParams()` in `Web
 | 68 | approach (f32) | 0→1 ramp |
 | 72 | pan (vec2f) | canvas pixels |
 | 80 | spin (f32) | angularMomentum/100 |
-| 84–95 | _pad2, _pad3 | |
+| 84 | collision (f32) | collisionStrength/100 when enabled, else 0 |
+| 88–95 | _pad3 (vec2f) | |
 
 ## Black hole buffer layout
 
@@ -167,6 +190,26 @@ The `Params` struct must stay byte-for-byte aligned with `writeParams()` in `Web
 | 16 + k×16 | holes[k]: vec4f (x, y, z, mass) |
 
 `bhBuffer` holds true physics mass; `bhRenderBuffer` holds smoothed `displayMass` for visual sizing and lens calculation.
+
+## Presets
+
+Defined in `src/presets.ts` as a `PRESETS: Preset[]` array. Each preset has:
+
+```ts
+interface Preset {
+  value: string;          // <option> value
+  label: string;          // display text, include "[+Nbh]" when blackHoles.length > 0
+  config: SimulationConfig;
+  collisionEnabled: boolean;
+  blackHoles: { x, y, z, mass }[];  // spawned 5 s after trigger
+}
+```
+
+On selection: config is applied, all sliders are updated via `ui.setValues()`, collision state is set, `universe.trigger()` is called, and any BHs are placed via `setTimeout(..., 5000)`. The select resets to empty immediately — it is a one-shot action.
+
+Current presets:
+- **Spiral formation [+1bh]** — 1.76 M particles, BH at (10, 6, 3) mass 10
+- **Sparse formation** — 1.3 M particles, no BH
 
 ## Initial conditions
 
@@ -192,13 +235,21 @@ Particles initialise as a uniform sphere:
 - Each pipeline using `layout: "auto"` requires its own bind group, even if bindings are identical. Sharing bind groups across auto-layout pipelines causes GPU validation errors.
 - The lens pass (pass 2) reads `bhRenderBuffer` at binding 1 and `sceneTexture` at binding 2. The BH ring pass reads `bhRenderBuffer` at binding 1. The postIntegrate compute reads `bhBuffer` (physics mass) at binding 4.
 - WGSL compiles at runtime; TypeScript compilation does not validate it.
+- POST_SHADER Params uses a single-line struct format; `replace_all` edits that match multi-line patterns will silently miss it. Edit the single-line form directly.
 
 **Adding controls:**
 1. Add property to `SimulationConfig` in `config.ts`
 2. Add default to `DEFAULT_CONFIG`
-3. Add entry to `CONTROL_DEFINITIONS` (key, label, min, max, default)
+3. Add entry to `CONTROL_DEFINITIONS` (key, label, min, max, step, format)
 4. Write value in `writeParams()` at the correct byte offset
 5. Retrigger if the parameter affects initial conditions
+6. Add `row.dataset.key = definition.key` is already done in `UI` constructor — queries by `[data-key]` work automatically
+
+**Adding presets:**
+1. Add an entry to `PRESETS` in `src/presets.ts`
+2. The dropdown populates itself at startup; no HTML changes needed
+3. If the preset places BHs, append `[+Nbh]` to the label string
+4. BHs are always placed 5 seconds after trigger (hardcoded in `main.ts`)
 
 **BH changes:**
 - Max 8 black holes (hardcoded; matches `holes: array<vec4f, 8>` in WGSL and 144-byte buffer layout)
