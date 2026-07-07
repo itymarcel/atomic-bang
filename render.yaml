@@ -1,0 +1,6 @@
+services:
+  - type: web
+    name: atom-collision-simulator
+    runtime: static
+    buildCommand: npm ci && npm run build
+    staticPublishPath: ./dist
