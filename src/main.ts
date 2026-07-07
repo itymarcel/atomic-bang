@@ -1,7 +1,6 @@
 import { DEFAULT_CONFIG, CONTROL_DEFINITIONS } from "./config.js";
 import { UI } from "./UI.js";
 import { WebGPUUniverse } from "./WebGPUUniverse.js";
-import { PRESETS } from "./presets.js";
 
 function readURL(): typeof DEFAULT_CONFIG {
   const params = new URLSearchParams(location.search);
@@ -52,44 +51,13 @@ const ui = new UI(config, next => {
 
 const rotateBtn = document.querySelector<HTMLButtonElement>("#rotate")!;
 const collisionInput = document.querySelector<HTMLInputElement>("#collision")!;
-const collisionRow = document.querySelector<HTMLElement>('[data-key="collisionStrength"]')!;
+const collisionRow = document.querySelector<HTMLElement>('[data-key="collisionEnergyLoss"]')!;
 
 function setCollision(enabled: boolean): void {
   universe.collisionEnabled = enabled;
   collisionInput.checked = enabled;
   collisionRow.classList.toggle("disabled", !enabled);
 }
-
-// Populate preset dropdown
-const presetSelect = document.querySelector<HTMLSelectElement>("#preset-select")!;
-for (const preset of PRESETS) {
-  const opt = document.createElement("option");
-  opt.value = preset.value;
-  opt.textContent = preset.label;
-  presetSelect.append(opt);
-}
-
-presetSelect.addEventListener("change", () => {
-  const preset = PRESETS.find(p => p.value === presetSelect.value);
-  presetSelect.value = "";
-  if (!preset) return;
-
-  Object.assign(config, preset.config);
-  universe.setConfig(config);
-  ui.setValues(config);
-
-  setCollision(preset.collisionEnabled);
-  writeURL(config, universe.collisionEnabled);
-  universe.trigger();
-
-  if (preset.blackHoles.length > 0) {
-    setTimeout(() => {
-      for (const bh of preset.blackHoles) {
-        universe.placeBlackHole(bh.x, bh.y, bh.z, bh.mass);
-      }
-    }, 5000);
-  }
-});
 
 addEventListener("resize", () => universe.resize());
 document.querySelector("#trigger")!.addEventListener("click", () => universe.trigger());

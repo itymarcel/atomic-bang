@@ -7,7 +7,7 @@ export interface SimulationConfig {
   randomness: number;
   angularMomentum: number;
   timeScale: number;
-  collisionStrength: number;
+  collisionEnergyLoss: number;
 }
 
 export const DEFAULT_CONFIG: SimulationConfig = {
@@ -19,7 +19,7 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   randomness: 64,
   angularMomentum: 50,
   timeScale: 1,
-  collisionStrength: 10,
+  collisionEnergyLoss: 10,
 };
 
 export interface ControlDefinition {
@@ -40,5 +40,5 @@ export const CONTROL_DEFINITIONS: ControlDefinition[] = [
   { key: "randomness", label: "Entropy", min: 0, max: 100, step: 1, format: v => `${v}%` },
   { key: "angularMomentum", label: "Initial rotation", min: 0, max: 100, step: 5, format: v => `${v}%` },
   { key: "timeScale", label: "Overall speed", min: 0.1, max: 4, step: 0.1, format: v => `${v.toFixed(1)}×` },
-  { key: "collisionStrength", label: "Collision energy loss", min: 0, max: 100, step: 1, format: v => (v / 100).toFixed(2) },
+  { key: "collisionEnergyLoss", label: "Collision energy loss", min: 0, max: 100, step: 1, format: v => (v / 100).toFixed(2) },
 ];

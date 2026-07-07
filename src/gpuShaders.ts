@@ -357,8 +357,7 @@ fn postIntegrate(@builtin(global_invocation_id) gid: vec3u) {
     }
   }
   // Grid-based collision: CIC-interpolate the local mean velocity from all 8 neighbour
-  // cells using the same weights used during deposit. Reading only the base cell causes
-  // sharp discontinuities at cell boundaries; interpolation gives a smooth field.
+  // cells, then dissipate this fraction of relative velocity into unresolved heat.
   if (params.collision > 0.0) {
     var interpMean = vec3f(0.0);
     var totalW = 0.0;
@@ -387,17 +386,6 @@ fn postIntegrate(@builtin(global_invocation_id) gid: vec3u) {
       velocity += (interpMean / totalW - velocity) * params.collision;
     }
 
-    // Collisional matter should behave more like a bound, pressure-supported gas cloud
-    // than a one-way ballistic shell. Damp only outward radial drift, then apply a weak
-    // halo-like restoring term so clumps remain near the orbit target.
-    let radius = length(particles[i].position.xyz);
-    if (radius > 0.001) {
-      let radial = particles[i].position.xyz / radius;
-      let outward = max(0.0, dot(velocity, radial));
-      let outflowCooling = 1.0 - exp(-params.collision * params.dt * 4.5);
-      velocity -= radial * outward * outflowCooling;
-      velocity -= particles[i].position.xyz * params.collision * params.dt * 1.15;
-    }
   }
   particles[i].velocity = vec4f(velocity, 0.0);
   accelerations[i] = vec4f(acceleration, accelerations[i].w);

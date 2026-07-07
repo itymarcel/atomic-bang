@@ -19,7 +19,7 @@ export class UI {
       });
       controls.append(row);
 
-      if (definition.key === "collisionStrength") {
+      if (definition.key === "collisionEnergyLoss") {
         const collisionToggle = document.createElement("label");
         collisionToggle.className = "control toggle-control";
         collisionToggle.innerHTML = `<span>Collision physics</span><input id="collision" type="checkbox" />`;

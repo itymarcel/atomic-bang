@@ -12,9 +12,6 @@
     <div id="bh-ring"></div>
 
     <aside class="panel">
-      <select id="preset-select">
-        <option value="">— preset —</option>
-      </select>
       <div id="controls" class="controls"></div>
 
       <div class="actions">
@@ -22,13 +19,18 @@
         <button id="pause" class="icon-button" aria-label="Pause simulation">Ⅱ</button>
         <button id="rotate" class="icon-button" aria-label="Auto-rotate camera">↻</button>
       </div>
-
-      <div class="stats">
-        <span id="stat-fps">-- fps</span>
-        <span id="stat-time">0:00</span>
-      </div>
-      <p class="hint">Hold canvas to spawn black hole</p>
+      <section class="info-box" aria-labelledby="additional-controls-title">
+        <div class="info-heading">
+          <h2 id="additional-controls-title">Additional controls</h2>
+        </div>
+        <p>Click &amp; hold to spawn black hole</p>
+      </section>
     </aside>
+
+    <div class="stats" aria-label="Simulation stats">
+      <span id="stat-fps">-- fps</span>
+      <span><span id="stat-time">0:00</span> since big bang</span>
+    </div>
 
     <script type="module" src="/src/main.js"></script>
   </body>

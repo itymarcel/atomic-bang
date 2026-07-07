@@ -23,11 +23,10 @@ WebGPU requires a secure context; `localhost` qualifies. Firefox Nightly and Chr
 
 ```text
 index.html              Minimal markup, panel structure, BH ring overlay
-src/main.ts             App lifecycle, event handlers, BH placement, preset wiring, frame loop
+src/main.ts             App lifecycle, event handlers, BH placement, frame loop
 src/config.ts           SimulationConfig types, defaults, and slider definitions
-src/presets.ts          Preset definitions (config snapshots + BH spawn list)
 src/UI.ts               Slider and button bindings, setValues() for programmatic updates
-src/style.css           Layout, floating panel, stats, hint, BH ring, preset select
+src/style.css           Layout, floating panel, stats, info box, BH ring
 src/OrbitCamera.ts      Orbit / pan / pinch-zoom / auto-rotate / unproject
 src/WebGPUUniverse.ts   GPU simulation engine, BH physics, render pipeline
 src/gpuShaders.ts       All WGSL shaders (compute + render + lens)
@@ -35,11 +34,6 @@ src/webgpu.d.ts         Minimal local WebGPU TypeScript type stubs
 ```
 
 ## Controls
-
-**Preset dropdown (top of panel):**
-- Selects a named configuration snapshot; immediately applies all sliders, collision state, triggers the universe, and schedules any BH spawns
-- Resets to `— preset —` after selection (one-shot action, not persistent state)
-- Dropdown label shows `[+Nbh]` when the preset includes automatic BH placement
 
 **Sliders (all persisted in URL query string):**
 - Particle count — 1,000 to 2,000,000
@@ -56,7 +50,7 @@ src/webgpu.d.ts         Minimal local WebGPU TypeScript type stubs
 - Start / retrigger — clears and restarts the universe
 - Pause (Ⅱ) — freezes simulation time
 - Auto-rotate (↻) — smooth camera orbit around current view position, at 1/3 normal orbit speed
-- Collision (⊗) — toggles grid-based momentum-conserving particle collision; the energy-loss slider is disabled (greyed) when off
+- Collision physics — toggles grid-based momentum-conserving particle collision; the energy-loss slider is disabled (greyed) when off
 
 **Black hole placement:**
 - Click and hold on the canvas — a growing orange ring preview appears
@@ -110,7 +104,7 @@ velocity  += (interpMean - velocity) × params.collision
 
 Reading all 8 cells (not just the nearest cell) is critical — nearest-cell lookup creates sharp discontinuities at grid boundaries and causes visible oscillation artefacts. The interpolated field is smooth and consistent with how gravity is read back from `gradientBuffer`.
 
-`params.collision = collisionStrength / 100`. Value 0 disables the block entirely. Value 1 is fully inelastic (all relative velocity dissipated in one step). Typical useful range: 0.02–0.15.
+`params.collision = collisionEnergyLoss / 100`. Value 0 disables the block entirely. Value 1 is fully inelastic (all relative velocity dissipated in one step). Typical useful range: 0.02–0.15.
 
 ### Black hole physics (CPU, per frame)
 
@@ -176,7 +170,7 @@ The `Params` struct must stay byte-for-byte aligned with `writeParams()` in `Web
 | 68 | approach (f32) | 0→1 ramp |
 | 72 | pan (vec2f) | canvas pixels |
 | 80 | spin (f32) | angularMomentum/100 |
-| 84 | collision (f32) | collisionStrength/100 when enabled, else 0 |
+| 84 | collision (f32) | collisionEnergyLoss/100 when enabled, else 0 |
 | 88–95 | _pad3 (vec2f) | |
 
 ## Black hole buffer layout
@@ -190,26 +184,6 @@ The `Params` struct must stay byte-for-byte aligned with `writeParams()` in `Web
 | 16 + k×16 | holes[k]: vec4f (x, y, z, mass) |
 
 `bhBuffer` holds true physics mass; `bhRenderBuffer` holds smoothed `displayMass` for visual sizing and lens calculation.
-
-## Presets
-
-Defined in `src/presets.ts` as a `PRESETS: Preset[]` array. Each preset has:
-
-```ts
-interface Preset {
-  value: string;          // <option> value
-  label: string;          // display text, include "[+Nbh]" when blackHoles.length > 0
-  config: SimulationConfig;
-  collisionEnabled: boolean;
-  blackHoles: { x, y, z, mass }[];  // spawned 5 s after trigger
-}
-```
-
-On selection: config is applied, all sliders are updated via `ui.setValues()`, collision state is set, `universe.trigger()` is called, and any BHs are placed via `setTimeout(..., 5000)`. The select resets to empty immediately — it is a one-shot action.
-
-Current presets:
-- **Spiral formation [+1bh]** — 1.76 M particles, BH at (10, 6, 3) mass 10
-- **Sparse formation** — 1.3 M particles, no BH
 
 ## Initial conditions
 
@@ -244,12 +218,6 @@ Particles initialise as a uniform sphere:
 4. Write value in `writeParams()` at the correct byte offset
 5. Retrigger if the parameter affects initial conditions
 6. Add `row.dataset.key = definition.key` is already done in `UI` constructor — queries by `[data-key]` work automatically
-
-**Adding presets:**
-1. Add an entry to `PRESETS` in `src/presets.ts`
-2. The dropdown populates itself at startup; no HTML changes needed
-3. If the preset places BHs, append `[+Nbh]` to the label string
-4. BHs are always placed 5 seconds after trigger (hardcoded in `main.ts`)
 
 **BH changes:**
 - Max 8 black holes (hardcoded; matches `holes: array<vec4f, 8>` in WGSL and 144-byte buffer layout)
