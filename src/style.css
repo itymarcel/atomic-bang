@@ -9,6 +9,8 @@ button, input { font: inherit; }
 .control { padding: 10px 0 6px; display: grid; grid-template-columns: 1fr auto; gap: 6px; color: #6b7280; font: 400 10px ui-monospace, monospace; text-transform: uppercase; letter-spacing: .08em; }
 .control output { color: #c0c6cf; }
 input[type=range] { grid-column: 1 / -1; width: 100%; accent-color: #ff8a5f; }
+.toggle-control { grid-template-columns: 1fr auto; align-items: center; padding-top: 6px; }
+.toggle-control input { width: 16px; height: 16px; margin: 0; accent-color: #ff8a5f; cursor: pointer; }
 .actions { display: flex; gap: 8px; margin-top: 14px; }
 button { border: 0; cursor: pointer; }
 .trigger { height: 36px; flex: 1; padding: 0 14px; background: rgba(255,255,255,.12); color: #edf0f3; font: 500 11px system-ui, sans-serif; }

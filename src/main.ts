@@ -16,15 +16,22 @@ function readURL(): typeof DEFAULT_CONFIG {
   return config;
 }
 
-function writeURL(config: typeof DEFAULT_CONFIG): void {
+function readCollisionURL(): boolean {
+  const raw = new URLSearchParams(location.search).get("collision");
+  return raw === "1" || raw === "true" || raw === "on";
+}
+
+function writeURL(config: typeof DEFAULT_CONFIG, collisionEnabled: boolean): void {
   const params = new URLSearchParams();
   for (const def of CONTROL_DEFINITIONS) params.set(def.key, String(config[def.key]));
+  params.set("collision", collisionEnabled ? "1" : "0");
   history.replaceState(null, "", `?${params}`);
 }
 
 const canvas = document.querySelector<HTMLCanvasElement>("#universe")!;
 const bhRing = document.querySelector<HTMLDivElement>("#bh-ring")!;
 const config = readURL();
+const initialCollisionEnabled = readCollisionURL();
 
 let universe: WebGPUUniverse;
 try {
@@ -40,18 +47,16 @@ const ui = new UI(config, next => {
   Object.assign(config, next);
   universe.setConfig(next);
   clearTimeout(writeURLTimer);
-  writeURLTimer = setTimeout(() => writeURL(config), 300);
+  writeURLTimer = setTimeout(() => writeURL(config, universe.collisionEnabled), 300);
 });
 
-writeURL(config);
-
 const rotateBtn = document.querySelector<HTMLButtonElement>("#rotate")!;
-const collisionBtn = document.querySelector<HTMLButtonElement>("#collision")!;
+const collisionInput = document.querySelector<HTMLInputElement>("#collision")!;
 const collisionRow = document.querySelector<HTMLElement>('[data-key="collisionStrength"]')!;
 
 function setCollision(enabled: boolean): void {
   universe.collisionEnabled = enabled;
-  collisionBtn.classList.toggle("active", enabled);
+  collisionInput.checked = enabled;
   collisionRow.classList.toggle("disabled", !enabled);
 }
 
@@ -72,9 +77,9 @@ presetSelect.addEventListener("change", () => {
   Object.assign(config, preset.config);
   universe.setConfig(config);
   ui.setValues(config);
-  writeURL(config);
 
   setCollision(preset.collisionEnabled);
+  writeURL(config, universe.collisionEnabled);
   universe.trigger();
 
   if (preset.blackHoles.length > 0) {
@@ -93,8 +98,12 @@ rotateBtn.addEventListener("click", () => {
   universe.camera.autoRotate = !universe.camera.autoRotate;
   rotateBtn.classList.toggle("active", universe.camera.autoRotate);
 });
-collisionBtn.addEventListener("click", () => setCollision(!universe.collisionEnabled));
-setCollision(false);
+collisionInput.addEventListener("change", () => {
+  setCollision(collisionInput.checked);
+  writeURL(config, universe.collisionEnabled);
+});
+setCollision(initialCollisionEnabled);
+writeURL(config, universe.collisionEnabled);
 addEventListener("keydown", event => {
   if (event.code === "Space" && event.target === document.body) {
     event.preventDefault();

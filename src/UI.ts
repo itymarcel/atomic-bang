@@ -18,6 +18,13 @@ export class UI {
         onChange({ ...config });
       });
       controls.append(row);
+
+      if (definition.key === "collisionStrength") {
+        const collisionToggle = document.createElement("label");
+        collisionToggle.className = "control toggle-control";
+        collisionToggle.innerHTML = `<span>Collision physics</span><input id="collision" type="checkbox" />`;
+        controls.append(collisionToggle);
+      }
     }
   }
 
