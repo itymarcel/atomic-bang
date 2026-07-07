@@ -386,6 +386,18 @@ fn postIntegrate(@builtin(global_invocation_id) gid: vec3u) {
     if (totalW > 0.0) {
       velocity += (interpMean / totalW - velocity) * params.collision;
     }
+
+    // Collisional matter should behave more like a bound, pressure-supported gas cloud
+    // than a one-way ballistic shell. Damp only outward radial drift, then apply a weak
+    // halo-like restoring term so clumps remain near the orbit target.
+    let radius = length(particles[i].position.xyz);
+    if (radius > 0.001) {
+      let radial = particles[i].position.xyz / radius;
+      let outward = max(0.0, dot(velocity, radial));
+      let outflowCooling = 1.0 - exp(-params.collision * params.dt * 4.5);
+      velocity -= radial * outward * outflowCooling;
+      velocity -= particles[i].position.xyz * params.collision * params.dt * 1.15;
+    }
   }
   particles[i].velocity = vec4f(velocity, 0.0);
   accelerations[i] = vec4f(acceleration, accelerations[i].w);
