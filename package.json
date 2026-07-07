@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "npm run build && python3 -m http.server 4173 -d dist",
-    "build": "tsc && cp index.html dist/index.html && cp src/style.css dist/style.css"
+    "build": "tsc && cp index.html dist/index.html && cp src/style.css dist/style.css && cp dist/style.css style.css && cp dist/src/*.js src/"
   },
   "devDependencies": {
     "typescript": "^5.8.3"

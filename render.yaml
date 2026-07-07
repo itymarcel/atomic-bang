@@ -2,5 +2,6 @@ services:
   - type: web
     name: atom-collision-simulator
     runtime: static
+    plan: free
     buildCommand: npm ci && npm run build
     staticPublishPath: ./dist
